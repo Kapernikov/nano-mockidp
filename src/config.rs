@@ -50,7 +50,9 @@ fn parse_url(name: &str, v: &str) -> Result<Url, String> {
         return Err(format!("{name}: URL must be absolute with a host: {v:?}"));
     }
     if url.query().is_some() || url.fragment().is_some() {
-        return Err(format!("{name}: URL must not contain query or fragment: {v:?}"));
+        return Err(format!(
+            "{name}: URL must not contain query or fragment: {v:?}"
+        ));
     }
     Ok(url)
 }
@@ -68,7 +70,11 @@ impl Config {
     }
 
     pub fn from_map(m: &HashMap<String, String>) -> Result<Config, String> {
-        let get = |k: &str| m.get(k).map(|s| s.as_str()).filter(|s| !s.trim().is_empty());
+        let get = |k: &str| {
+            m.get(k)
+                .map(|s| s.as_str())
+                .filter(|s| !s.trim().is_empty())
+        };
 
         let port = match get("PORT") {
             Some(v) => v
@@ -77,7 +83,10 @@ impl Config {
                 .map_err(|e| format!("PORT: invalid port {v:?}: {e}"))?,
             None => 8080,
         };
-        let issuer_url = parse_url("ISSUER_URL", get("ISSUER_URL").unwrap_or("http://localhost:8080"))?;
+        let issuer_url = parse_url(
+            "ISSUER_URL",
+            get("ISSUER_URL").unwrap_or("http://localhost:8080"),
+        )?;
         let issuer_path = issuer_url.path().trim_end_matches('/').to_string();
         let endpoints_from_request_host = match get("ENDPOINTS_FROM_REQUEST_HOST") {
             Some(v) => parse_bool(v).map_err(|e| format!("ENDPOINTS_FROM_REQUEST_HOST: {e}"))?,
@@ -92,7 +101,9 @@ impl Config {
             None => false,
         };
         let clients: Vec<ClientConfig> = match get("CLIENTS") {
-            Some(v) => serde_json::from_str(v).map_err(|e| format!("CLIENTS: invalid JSON: {e}"))?,
+            Some(v) => {
+                serde_json::from_str(v).map_err(|e| format!("CLIENTS: invalid JSON: {e}"))?
+            }
             None => Vec::new(),
         };
         let login_page_path = get("LOGIN_PAGE_PATH").map(PathBuf::from);
@@ -147,7 +158,10 @@ mod tests {
     use super::*;
 
     fn cfg(pairs: &[(&str, &str)]) -> Result<Config, String> {
-        let m = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let m = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         Config::from_map(&m)
     }
 
@@ -198,7 +212,11 @@ mod tests {
     #[test]
     fn bool_parsing() {
         assert!(cfg(&[("STRICT", "YES")]).unwrap().strict);
-        assert!(!cfg(&[("ENDPOINTS_FROM_REQUEST_HOST", "0")]).unwrap().endpoints_from_request_host);
+        assert!(
+            !cfg(&[("ENDPOINTS_FROM_REQUEST_HOST", "0")])
+                .unwrap()
+                .endpoints_from_request_host
+        );
         assert!(cfg(&[("STRICT", "maybe")]).is_err());
     }
 }

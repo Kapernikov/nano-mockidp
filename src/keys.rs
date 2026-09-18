@@ -81,7 +81,11 @@ impl SigningKey {
         let public = key.to_public_key();
         let der = public.to_public_key_der().expect("der encode");
         let digest = Sha256::digest(der.as_bytes());
-        let kid: String = digest.iter().map(|b| format!("{b:02x}")).collect::<String>()[..16].to_string();
+        let kid: String = digest
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()[..16]
+            .to_string();
         let n = URL_SAFE_NO_PAD.encode(public.n().to_bytes_be());
         let e = URL_SAFE_NO_PAD.encode(public.e().to_bytes_be());
         let encoding = EncodingKey::from_rsa_pem(private_pem.as_bytes()).expect("encoding key");
@@ -119,8 +123,14 @@ mod tests {
 
     #[test]
     fn seed_is_deterministic() {
-        assert_eq!(SigningKey::from_seed("a").kid, SigningKey::from_seed("a").kid);
-        assert_ne!(SigningKey::from_seed("a").kid, SigningKey::from_seed("b").kid);
+        assert_eq!(
+            SigningKey::from_seed("a").kid,
+            SigningKey::from_seed("a").kid
+        );
+        assert_ne!(
+            SigningKey::from_seed("a").kid,
+            SigningKey::from_seed("b").kid
+        );
     }
 
     #[test]

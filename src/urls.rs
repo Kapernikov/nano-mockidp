@@ -45,7 +45,11 @@ impl Endpoints {
     pub fn resolve(cfg: &Config, request_base: Option<&str>) -> Endpoints {
         let public = cfg.issuer();
         let path = &cfg.issuer_path;
-        let internal = match (&cfg.internal_url, request_base, cfg.endpoints_from_request_host) {
+        let internal = match (
+            &cfg.internal_url,
+            request_base,
+            cfg.endpoints_from_request_host,
+        ) {
             (Some(u), _, _) => u.as_str().trim_end_matches('/').to_string(),
             (None, Some(base), true) => format!("{}{}", base.trim_end_matches('/'), path),
             _ => public.clone(),
@@ -69,8 +73,10 @@ mod tests {
     use std::collections::HashMap;
 
     fn cfg(pairs: &[(&str, &str)]) -> Config {
-        let m: HashMap<String, String> =
-            pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let m: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         Config::from_map(&m).unwrap()
     }
 

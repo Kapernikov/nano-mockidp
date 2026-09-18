@@ -46,7 +46,10 @@ impl IntoResponse for OAuthError {
         h.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
         h.insert(header::PRAGMA, "no-cache".parse().unwrap());
         if self.status == StatusCode::UNAUTHORIZED {
-            h.insert(header::WWW_AUTHENTICATE, "Basic realm=\"nano-mockidp\"".parse().unwrap());
+            h.insert(
+                header::WWW_AUTHENTICATE,
+                "Basic realm=\"nano-mockidp\"".parse().unwrap(),
+            );
         }
         resp
     }

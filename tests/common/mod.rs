@@ -19,9 +19,12 @@ pub async fn spawn(env: &[(&str, &str)]) -> TestServer {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let root = format!("http://127.0.0.1:{port}");
-    let mut map: HashMap<String, String> =
-        env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-    map.entry("ISSUER_URL".into()).or_insert_with(|| root.clone());
+    let mut map: HashMap<String, String> = env
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    map.entry("ISSUER_URL".into())
+        .or_insert_with(|| root.clone());
     let config = Config::from_map(&map).unwrap();
     let issuer = config.issuer();
     let base = format!("{root}{}", config.issuer_path);

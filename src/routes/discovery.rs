@@ -5,7 +5,10 @@ use serde_json::{json, Value};
 use crate::state::SharedState;
 use crate::urls::{Endpoints, RequestBase};
 
-pub async fn handler(State(state): State<SharedState>, RequestBase(base): RequestBase) -> Json<Value> {
+pub async fn handler(
+    State(state): State<SharedState>,
+    RequestBase(base): RequestBase,
+) -> Json<Value> {
     let e = Endpoints::resolve(&state.config, Some(&base));
     Json(json!({
         "issuer": e.issuer,

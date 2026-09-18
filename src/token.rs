@@ -139,7 +139,10 @@ mod tests {
             "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
             "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
         ));
-        assert!(!pkce_verify("wrong", "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"));
+        assert!(!pkce_verify(
+            "wrong",
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        ));
     }
 
     #[test]
@@ -202,7 +205,12 @@ mod tests {
         assert_eq!(h["typ"], "JWT");
 
         assert!(verify(&k, "http://other", &set.access_token).is_err());
-        assert!(verify(&SigningKey::from_seed("other"), "http://issuer/oidc", &set.access_token).is_err());
+        assert!(verify(
+            &SigningKey::from_seed("other"),
+            "http://issuer/oidc",
+            &set.access_token
+        )
+        .is_err());
     }
 
     #[test]

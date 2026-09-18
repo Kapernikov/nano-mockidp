@@ -102,7 +102,10 @@ fn validate(state: &SharedState, q: &AuthorizeQuery) -> Result<AuthRequest, Auth
     if state.config.strict {
         let store = state.store();
         let client = store.clients.get(client_id).ok_or_else(|| {
-            AuthzError::Page(StatusCode::BAD_REQUEST, format!("unknown client_id: {client_id}"))
+            AuthzError::Page(
+                StatusCode::BAD_REQUEST,
+                format!("unknown client_id: {client_id}"),
+            )
         })?;
         let registered = client.redirect_uris.as_deref().unwrap_or(&[]);
         if !registered.iter().any(|u| u == redirect_uri) {
@@ -168,11 +171,7 @@ pub async fn get(State(state): State<SharedState>, Query(q): Query<AuthorizeQuer
         .pending
         .insert(random_token(), Expiring::new(req, PENDING_TTL));
     match load_login_page(&state.config) {
-        Ok(html) => (
-            [(header::CACHE_CONTROL, "no-store")],
-            Html(html),
-        )
-            .into_response(),
+        Ok(html) => ([(header::CACHE_CONTROL, "no-store")], Html(html)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Html(error_page(&format!(
@@ -199,33 +198,65 @@ pub async fn post(
         Err(e) => return e.into_response(),
     };
 
-    let mut claims: Claims = match form.claims.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let mut claims: Claims = match form
+        .claims
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         None => Claims::new(),
         Some(raw) => match serde_json::from_str::<Value>(raw) {
             Ok(Value::Object(m)) => m,
-            Ok(_) => return AuthzError::Page(StatusCode::BAD_REQUEST, "claims must be a JSON object".into()).into_response(),
-            Err(e) => return AuthzError::Page(StatusCode::BAD_REQUEST, format!("claims is not valid JSON: {e}")).into_response(),
+            Ok(_) => {
+                return AuthzError::Page(
+                    StatusCode::BAD_REQUEST,
+                    "claims must be a JSON object".into(),
+                )
+                .into_response()
+            }
+            Err(e) => {
+                return AuthzError::Page(
+                    StatusCode::BAD_REQUEST,
+                    format!("claims is not valid JSON: {e}"),
+                )
+                .into_response()
+            }
         },
     };
-    let username = form.username.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let username = form
+        .username
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     if !claims.contains_key("sub") {
         match username {
             Some(u) => {
                 claims.insert("sub".into(), json!(u));
             }
             None => {
-                return AuthzError::Page(StatusCode::BAD_REQUEST, "username is required (or a `sub` claim)".into())
-                    .into_response()
+                return AuthzError::Page(
+                    StatusCode::BAD_REQUEST,
+                    "username is required (or a `sub` claim)".into(),
+                )
+                .into_response()
             }
         }
     }
-    let expires_in = match form.expires_in.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let expires_in = match form
+        .expires_in
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         None => None,
         Some(v) => match v.parse::<u64>() {
             Ok(n) => Some(n),
             Err(_) => {
-                return AuthzError::Page(StatusCode::BAD_REQUEST, format!("expires_in must be an integer, got {v}"))
-                    .into_response()
+                return AuthzError::Page(
+                    StatusCode::BAD_REQUEST,
+                    format!("expires_in must be an integer, got {v}"),
+                )
+                .into_response()
             }
         },
     };
@@ -245,11 +276,18 @@ pub async fn post(
         auth_time: now_secs(),
         expires_in,
     };
-    state.store().codes.insert(code, Expiring::new(entry, CODE_TTL));
+    state
+        .store()
+        .codes
+        .insert(code, Expiring::new(entry, CODE_TTL));
     found(location.as_str())
 }
 
 /// 302 Found redirect (OAuth convention; axum's `Redirect::to` uses 303).
 pub fn found(location: &str) -> Response {
-    (StatusCode::FOUND, [(header::LOCATION, location.to_string())]).into_response()
+    (
+        StatusCode::FOUND,
+        [(header::LOCATION, location.to_string())],
+    )
+        .into_response()
 }

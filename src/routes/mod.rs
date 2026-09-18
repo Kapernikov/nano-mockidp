@@ -1,10 +1,15 @@
 mod authorize;
 mod discovery;
 mod health;
+mod introspect;
 mod jwks;
+mod register;
+mod session;
+mod token;
+mod userinfo;
 
 use axum::http::{HeaderValue, Method};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::trace::TraceLayer;
@@ -16,6 +21,11 @@ pub fn router(state: SharedState) -> Router {
         .route("/.well-known/openid-configuration", get(discovery::handler))
         .route("/jwks", get(jwks::handler))
         .route("/authorize", get(authorize::get).post(authorize::post))
+        .route("/token", post(token::handler))
+        .route("/userinfo", get(userinfo::handler).post(userinfo::handler))
+        .route("/introspect", post(introspect::handler))
+        .route("/end_session", get(session::handler))
+        .route("/register", post(register::handler))
         .route("/health", get(health::handler));
 
     let path = state.config.issuer_path.clone();

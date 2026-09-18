@@ -149,7 +149,9 @@ mod tests {
     fn random_token_is_43_chars_urlsafe() {
         let t = random_token();
         assert_eq!(t.len(), 43);
-        assert!(t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(t
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
         assert_ne!(t, random_token());
     }
 }
