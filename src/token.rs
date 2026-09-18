@@ -16,6 +16,8 @@ pub struct Issuer<'a> {
 
 pub struct IssueParams {
     pub client_id: String,
+    /// Explicit `aud` (string or array). None → client_id.
+    pub audience: Option<Value>,
     pub scope: Option<String>,
     pub nonce: Option<String>,
     pub claims: Claims,
@@ -44,6 +46,15 @@ pub fn merge_claims(mut base: Claims, user: Claims) -> Claims {
     base
 }
 
+/// RFC 8707: turn `resource` values into an `aud` claim (string for one, array for several).
+pub fn audience_from_resources(resources: &[String]) -> Option<Value> {
+    match resources {
+        [] => None,
+        [one] => Some(json!(one)),
+        many => Some(json!(many)),
+    }
+}
+
 pub fn pkce_verify(verifier: &str, challenge: &str) -> bool {
     let digest = Sha256::digest(verifier.as_bytes());
     URL_SAFE_NO_PAD.encode(digest) == challenge
@@ -62,7 +73,10 @@ impl<'a> Issuer<'a> {
 
         let mut base = Claims::new();
         base.insert("sub".into(), json!(p.client_id));
-        base.insert("aud".into(), json!(p.client_id));
+        base.insert(
+            "aud".into(),
+            p.audience.clone().unwrap_or_else(|| json!(p.client_id)),
+        );
         base.insert("azp".into(), json!(p.client_id));
         base.insert("auth_time".into(), json!(p.auth_time));
         if let Some(scope) = &p.scope {
@@ -175,6 +189,16 @@ mod tests {
     }
 
     #[test]
+    fn audience_from_resources_shape() {
+        assert_eq!(audience_from_resources(&[]), None);
+        assert_eq!(audience_from_resources(&["a".into()]), Some(json!("a")));
+        assert_eq!(
+            audience_from_resources(&["a".into(), "b".into()]),
+            Some(json!(["a", "b"]))
+        );
+    }
+
+    #[test]
     fn merge_precedence() {
         let mut base = Claims::new();
         base.insert("sub".into(), json!("client"));
@@ -204,6 +228,7 @@ mod tests {
         claims.insert("email".into(), json!("a@b"));
         let set = iss.issue(IssueParams {
             client_id: "app".into(),
+            audience: None,
             scope: Some("openid".into()),
             nonce: Some("n1".into()),
             claims,
@@ -262,6 +287,7 @@ mod tests {
         };
         let set = iss.issue(IssueParams {
             client_id: "app".into(),
+            audience: Some(json!(["api", "mcp"])),
             scope: None,
             nonce: None,
             claims: Claims::new(),
@@ -271,5 +297,8 @@ mod tests {
         });
         assert!(set.id_token.is_none());
         assert_eq!(set.expires_in, 5);
+        let (_, c) = decode_unverified(&set.access_token);
+        assert_eq!(c["aud"], json!(["api", "mcp"]));
+        assert_eq!(c["azp"], "app");
     }
 }

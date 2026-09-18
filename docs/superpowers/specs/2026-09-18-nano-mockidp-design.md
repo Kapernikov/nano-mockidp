@@ -129,7 +129,8 @@ All paths are relative to the path component of `ISSUER_URL`.
 
 Query: `response_type` (must be `code`), `client_id` (required),
 `redirect_uri` (required), `state`, `scope`, `nonce`, `code_challenge`,
-`code_challenge_method` (must be `S256` if present).
+`code_challenge_method` (must be `S256` if present), `resource` (RFC 8707, may
+repeat; stored with the request, added v0.3.0).
 
 Strict mode additionally: client must exist; `redirect_uri` must be in the
 client's registered list (exact match); `code_challenge` required when the
@@ -180,8 +181,13 @@ Grants:
 - `refresh_token`: `refresh_token`. Must exist and be unexpired. Old token is
   deleted, new one issued (rotation). Tokens re-issued with the claims stored
   at login, fresh `iat`/`exp`/`jti`, same `auth_time`.
-- `client_credentials`: no user. Claims: `sub = client_id`, `aud = client_id`
-  (or `audience` body param if present), `scope`. No id_token, no refresh token.
+- `client_credentials`: no user. Claims: `sub = client_id`, `scope`. No id_token,
+  no refresh token.
+
+Audience (all grants, v0.3.0): `aud` = token-time `resource` value(s) (string or
+array), else token-time `audience`, else authorize-time `resource`(s) (carried
+into the refresh token), else `client_id`. `azp` is always `client_id`. An `aud`
+in the user-typed claims overrides all of these.
 
 Response (200, `Cache-Control: no-store`):
 

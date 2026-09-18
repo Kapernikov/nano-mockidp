@@ -1,4 +1,4 @@
-use axum::extract::{Form, Query, State};
+use axum::extract::{Form, Query, RawQuery, State};
 use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use serde::Deserialize;
@@ -79,8 +79,23 @@ fn error_page(msg: &str) -> String {
     )
 }
 
+/// All `resource` (RFC 8707) values from the raw query string (may repeat).
+fn resources_from_query(raw: Option<&str>) -> Vec<String> {
+    raw.map(|q| {
+        url::form_urlencoded::parse(q.as_bytes())
+            .filter(|(k, v)| k == "resource" && !v.is_empty())
+            .map(|(_, v)| v.into_owned())
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
 /// Validate an authorization request. Returns the request to store on success.
-fn validate(state: &SharedState, q: &AuthorizeQuery) -> Result<AuthRequest, AuthzError> {
+fn validate(
+    state: &SharedState,
+    q: &AuthorizeQuery,
+    resources: Vec<String>,
+) -> Result<AuthRequest, AuthzError> {
     let client_id = q
         .client_id
         .as_deref()
@@ -158,11 +173,16 @@ fn validate(state: &SharedState, q: &AuthorizeQuery) -> Result<AuthRequest, Auth
         scope: q.scope.clone(),
         nonce: q.nonce.clone(),
         code_challenge: q.code_challenge.clone(),
+        resources,
     })
 }
 
-pub async fn get(State(state): State<SharedState>, Query(q): Query<AuthorizeQuery>) -> Response {
-    let req = match validate(&state, &q) {
+pub async fn get(
+    State(state): State<SharedState>,
+    Query(q): Query<AuthorizeQuery>,
+    RawQuery(raw): RawQuery,
+) -> Response {
+    let req = match validate(&state, &q, resources_from_query(raw.as_deref())) {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
@@ -191,9 +211,10 @@ pub async fn get(State(state): State<SharedState>, Query(q): Query<AuthorizeQuer
 pub async fn post(
     State(state): State<SharedState>,
     Query(q): Query<AuthorizeQuery>,
+    RawQuery(raw): RawQuery,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    let req = match validate(&state, &q) {
+    let req = match validate(&state, &q, resources_from_query(raw.as_deref())) {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };

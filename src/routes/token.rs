@@ -1,7 +1,7 @@
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::header::{self, HeaderMap};
 use axum::response::{IntoResponse, Response};
-use axum::Form;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use serde::Deserialize;
@@ -10,7 +10,7 @@ use serde_json::{json, Map, Value};
 use crate::error::OAuthError;
 use crate::state::SharedState;
 use crate::store::{now_secs, random_token, Claims, Expiring, RefreshEntry};
-use crate::token::{pkce_verify, IssueParams, TokenSet};
+use crate::token::{audience_from_resources, pkce_verify, IssueParams, TokenSet};
 use crate::urls::RequestBase;
 
 #[derive(Debug, Deserialize, Default)]
@@ -114,12 +114,50 @@ fn new_refresh(state: &SharedState, entry: RefreshEntry) -> String {
     token
 }
 
+/// Parse the form body: the typed fields plus every `resource` value (RFC 8707, may repeat).
+fn parse_body(headers: &HeaderMap, body: &[u8]) -> Result<(TokenForm, Vec<String>), OAuthError> {
+    let ct = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !ct.starts_with("application/x-www-form-urlencoded") {
+        return Err(OAuthError::invalid_request(
+            "content-type must be application/x-www-form-urlencoded",
+        ));
+    }
+    let form: TokenForm = serde_urlencoded::from_bytes(body)
+        .map_err(|e| OAuthError::invalid_request(format!("malformed form body: {e}")))?;
+    let resources = url::form_urlencoded::parse(body)
+        .filter(|(k, v)| k == "resource" && !v.is_empty())
+        .map(|(_, v)| v.into_owned())
+        .collect();
+    Ok((form, resources))
+}
+
+/// `aud` for a grant: token-time `resource`/`audience` wins, then the authorize-time
+/// resources, else None (→ client_id).
+fn resolve_audience(
+    form: &TokenForm,
+    token_resources: &[String],
+    fallback: Option<Value>,
+) -> Option<Value> {
+    audience_from_resources(token_resources)
+        .or_else(|| {
+            form.audience
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|a| json!(a))
+        })
+        .or(fallback)
+}
+
 pub async fn handler(
     State(state): State<SharedState>,
     RequestBase(base): RequestBase,
     headers: HeaderMap,
-    Form(form): Form<TokenForm>,
+    body: Bytes,
 ) -> Result<Response, OAuthError> {
+    let (form, token_resources) = parse_body(&headers, &body)?;
     let issuer = state.issuer_for(&base);
     let client_id = authenticate_client(
         &state,
@@ -164,8 +202,14 @@ pub async fn handler(
                     return Err(OAuthError::invalid_grant("PKCE verification failed"));
                 }
             }
+            let audience = resolve_audience(
+                &form,
+                &token_resources,
+                audience_from_resources(&entry.req.resources),
+            );
             let set = state.token_issuer(&issuer).issue(IssueParams {
                 client_id: client_id.clone(),
+                audience: audience.clone(),
                 scope: entry.req.scope.clone(),
                 nonce: entry.req.nonce.clone(),
                 claims: entry.claims.clone(),
@@ -178,6 +222,7 @@ pub async fn handler(
                 RefreshEntry {
                     client_id,
                     scope: entry.req.scope.clone(),
+                    audience,
                     claims: entry.claims,
                     auth_time: entry.auth_time,
                     expires_in: entry.expires_in,
@@ -203,8 +248,10 @@ pub async fn handler(
                     "refresh token was issued to a different client",
                 ));
             }
+            let audience = resolve_audience(&form, &token_resources, entry.audience.clone());
             let set = state.token_issuer(&issuer).issue(IssueParams {
                 client_id: client_id.clone(),
+                audience: audience.clone(),
                 scope: entry.scope.clone(),
                 nonce: None,
                 claims: entry.claims.clone(),
@@ -213,17 +260,15 @@ pub async fn handler(
                 with_id_token: true,
             });
             let scope = entry.scope.clone();
-            let refresh = new_refresh(&state, entry);
+            let refresh = new_refresh(&state, RefreshEntry { audience, ..entry });
             Ok(token_response(set, Some(refresh), scope.as_deref()))
         }
         Some("client_credentials") => {
             let mut claims = Claims::new();
             claims.insert("sub".into(), json!(client_id));
-            if let Some(aud) = form.audience.as_deref().filter(|s| !s.is_empty()) {
-                claims.insert("aud".into(), json!(aud));
-            }
             let set = state.token_issuer(&issuer).issue(IssueParams {
                 client_id,
+                audience: resolve_audience(&form, &token_resources, None),
                 scope: form.scope.clone(),
                 nonce: None,
                 claims,

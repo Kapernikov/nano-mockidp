@@ -108,12 +108,19 @@ All relative to the path of `ISSUER_URL`.
 | `GET /jwks` | One RS256 key |
 | `GET /authorize` | Renders the login page. Params: `response_type=code`, `client_id`, `redirect_uri`, `state`, `scope`, `nonce`, `code_challenge`, `code_challenge_method=S256` |
 | `POST /authorize` | Form post from the login page → `302 redirect_uri?code=…&state=…` |
-| `POST /token` | Grants: `authorization_code` (+ `code_verifier`), `refresh_token` (rotating), `client_credentials`. Client auth: Basic, body, or none. |
+| `POST /token` | Grants: `authorization_code` (+ `code_verifier`), `refresh_token` (rotating), `client_credentials`. Client auth: Basic, body, or none. `resource` (RFC 8707, repeatable) or `audience` sets `aud`. |
 | `GET/POST /userinfo` | Bearer access token → claims |
 | `POST /introspect` | RFC 7662; also works for refresh tokens |
 | `GET /end_session` | Redirects to `post_logout_redirect_uri` (+`state`) or shows "Logged out" |
 | `POST /register` | RFC 7591 dynamic client registration; returns `client_id`/`client_secret` |
 | `GET /health` | Also at the server root |
+
+**Audience (`aud`)**: defaults to the `client_id`. Pass `resource=<uri>` (RFC 8707, may repeat)
+on `/authorize` and/or `/token` — or `audience=<value>` on `/token` — to set it instead
+(string for one value, array for several; token-time values win over authorize-time ones;
+refresh keeps the audience). `azp` is always the `client_id`. MCP clients do this out of the
+box, so a self-registered MCP client can obtain a token your API accepts. An explicit `aud`
+typed into the login claims overrides everything.
 
 Access tokens and ID tokens are both RS256 JWTs with the same claims (`iss`, `sub`, `aud`, `azp`,
 `exp`, `iat`, `auth_time`, `jti`, `scope` + whatever you typed); the ID token adds `nonce` and

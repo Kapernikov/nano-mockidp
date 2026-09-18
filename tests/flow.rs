@@ -1062,3 +1062,140 @@ async fn x_forwarded_port_composition() {
     .unwrap();
     assert_eq!(d["jwks_uri"], "http://localhost:4200/p/jwks");
 }
+
+// ---------- RFC 8707 resource → aud ----------
+
+async fn exchange(s: &TestServer, code: &str, extra: &[(&str, &str)]) -> Value {
+    let mut form: Vec<(&str, &str)> = vec![
+        ("grant_type", "authorization_code"),
+        ("code", code),
+        ("redirect_uri", CB),
+        ("client_id", "app"),
+    ];
+    form.extend_from_slice(extra);
+    let (status, body) = post_token(s, &form).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body
+}
+
+fn aud_of(body: &Value, key: &str) -> Value {
+    let (_, c) = decode_jwt_unverified(body[key].as_str().unwrap());
+    c["aud"].clone()
+}
+
+#[tokio::test]
+async fn resource_on_token_sets_aud() {
+    let s = spawn(&[]).await;
+    let code = get_code(&s, "", &[("username", "a")]).await;
+    let body = exchange(&s, &code, &[("resource", "mockidp")]).await;
+    assert_eq!(aud_of(&body, "access_token"), "mockidp");
+    assert_eq!(aud_of(&body, "id_token"), "mockidp");
+    let (_, c) = decode_jwt_unverified(body["access_token"].as_str().unwrap());
+    assert_eq!(c["azp"], "app");
+    assert_eq!(c["sub"], "a");
+}
+
+#[tokio::test]
+async fn resource_on_authorize_is_remembered() {
+    let s = spawn(&[]).await;
+    let code = get_code(
+        &s,
+        "&resource=http%3A%2F%2Fmcp.test%2Fsse",
+        &[("username", "a")],
+    )
+    .await;
+    let body = exchange(&s, &code, &[]).await;
+    assert_eq!(aud_of(&body, "access_token"), "http://mcp.test/sse");
+    // refresh keeps the audience
+    let (status, b2) = post_token(
+        &s,
+        &[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", body["refresh_token"].as_str().unwrap()),
+            ("client_id", "app"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(aud_of(&b2, "access_token"), "http://mcp.test/sse");
+    // refresh with explicit resource overrides
+    let (status, b3) = post_token(
+        &s,
+        &[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", b2["refresh_token"].as_str().unwrap()),
+            ("client_id", "app"),
+            ("resource", "other"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(aud_of(&b3, "access_token"), "other");
+}
+
+#[tokio::test]
+async fn multiple_resources_become_array_and_token_time_wins() {
+    let s = spawn(&[]).await;
+    let code = get_code(&s, "&resource=authz-time", &[("username", "a")]).await;
+    let body = exchange(&s, &code, &[("resource", "r1"), ("resource", "r2")]).await;
+    assert_eq!(
+        aud_of(&body, "access_token"),
+        serde_json::json!(["r1", "r2"])
+    );
+}
+
+#[tokio::test]
+async fn audience_alias_on_code_grant() {
+    let s = spawn(&[]).await;
+    let code = get_code(&s, "", &[("username", "a")]).await;
+    let body = exchange(&s, &code, &[("audience", "api")]).await;
+    assert_eq!(aud_of(&body, "access_token"), "api");
+}
+
+#[tokio::test]
+async fn aud_defaults_to_client_id_and_claims_can_override() {
+    let s = spawn(&[]).await;
+    let code = get_code(&s, "", &[("username", "a")]).await;
+    let body = exchange(&s, &code, &[]).await;
+    assert_eq!(aud_of(&body, "access_token"), "app");
+    // explicit aud in the login claims beats resource
+    let code = get_code(
+        &s,
+        "&resource=res",
+        &[("username", "a"), ("claims", r#"{"aud":"typed"}"#)],
+    )
+    .await;
+    let body = exchange(&s, &code, &[]).await;
+    assert_eq!(aud_of(&body, "access_token"), "typed");
+}
+
+#[tokio::test]
+async fn client_credentials_resource() {
+    let s = spawn(&[]).await;
+    let (status, body) = post_token(
+        &s,
+        &[
+            ("grant_type", "client_credentials"),
+            ("client_id", "svc"),
+            ("resource", "api"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(aud_of(&body, "access_token"), "api");
+}
+
+#[tokio::test]
+async fn token_rejects_non_form_body() {
+    let s = spawn(&[]).await;
+    let r = s
+        .client
+        .post(s.url("/token"))
+        .json(&serde_json::json!({"grant_type":"client_credentials"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    let b: Value = r.json().await.unwrap();
+    assert_eq!(b["error"], "invalid_request");
+}

@@ -34,6 +34,8 @@ pub struct AuthRequest {
     pub scope: Option<String>,
     pub nonce: Option<String>,
     pub code_challenge: Option<String>,
+    /// RFC 8707 `resource` values given on /authorize.
+    pub resources: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +50,8 @@ pub struct CodeEntry {
 pub struct RefreshEntry {
     pub client_id: String,
     pub scope: Option<String>,
+    /// Audience the original grant resolved to (None = client_id).
+    pub audience: Option<Value>,
     pub claims: Claims,
     pub auth_time: u64,
     pub expires_in: Option<u64>,
@@ -118,6 +122,7 @@ mod tests {
             scope: None,
             nonce: None,
             code_challenge: None,
+            resources: Vec::new(),
         }
     }
 
