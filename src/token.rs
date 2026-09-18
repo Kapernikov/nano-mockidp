@@ -104,18 +104,47 @@ impl<'a> Issuer<'a> {
     }
 }
 
+/// How to check the `iss` claim when verifying a token.
+#[derive(Debug, Clone, Copy)]
+pub enum IssuerCheck<'a> {
+    /// `iss` must equal this string.
+    Exact(&'a str),
+    /// `iss` may have any scheme/host, but its path must equal this issuer path
+    /// (used with `ISSUER_FROM_REQUEST_HOST`).
+    PathOnly(&'a str),
+}
+
 /// Verify signature, `exp` and `iss` of a token issued by this server. Returns the claims.
-pub fn verify(key: &SigningKey, issuer: &str, token: &str) -> Result<Claims, String> {
+pub fn verify(key: &SigningKey, issuer: IssuerCheck<'_>, token: &str) -> Result<Claims, String> {
     let mut validation = Validation::new(Algorithm::RS256);
-    validation.set_issuer(&[issuer]);
     validation.validate_aud = false;
     validation.leeway = 0;
+    match issuer {
+        IssuerCheck::Exact(iss) => validation.set_issuer(&[iss]),
+        IssuerCheck::PathOnly(_) => {
+            validation.required_spec_claims.remove("iss");
+        }
+    }
     let data = jsonwebtoken::decode::<Value>(token, &key.decoding, &validation)
         .map_err(|e| e.to_string())?;
-    match data.claims {
-        Value::Object(m) => Ok(m),
-        _ => Err("claims are not an object".into()),
+    let claims = match data.claims {
+        Value::Object(m) => m,
+        _ => return Err("claims are not an object".into()),
+    };
+    if let IssuerCheck::PathOnly(path) = issuer {
+        let iss = claims
+            .get("iss")
+            .and_then(|v| v.as_str())
+            .ok_or("missing iss claim")?;
+        let url = url::Url::parse(iss).map_err(|e| format!("iss is not a URL: {e}"))?;
+        if url.path().trim_end_matches('/') != path {
+            return Err(format!(
+                "iss path {:?} does not match issuer path {path:?}",
+                url.path()
+            ));
+        }
     }
+    Ok(claims)
 }
 
 #[cfg(test)]
@@ -182,7 +211,12 @@ mod tests {
             expires_in: None,
             with_id_token: true,
         });
-        let access = verify(&k, "http://issuer/oidc", &set.access_token).unwrap();
+        let access = verify(
+            &k,
+            IssuerCheck::Exact("http://issuer/oidc"),
+            &set.access_token,
+        )
+        .unwrap();
         assert_eq!(access["iss"], "http://issuer/oidc");
         assert_eq!(access["sub"], "alice");
         assert_eq!(access["aud"], "app");
@@ -198,19 +232,23 @@ mod tests {
         assert_eq!(h["kid"], k.kid);
 
         let id = set.id_token.unwrap();
-        let idc = verify(&k, "http://issuer/oidc", &id).unwrap();
+        let idc = verify(&k, IssuerCheck::Exact("http://issuer/oidc"), &id).unwrap();
         assert_eq!(idc["nonce"], "n1");
         assert_eq!(idc["at_hash"], at_hash(&set.access_token));
         let (h, _) = decode_unverified(&id);
         assert_eq!(h["typ"], "JWT");
 
-        assert!(verify(&k, "http://other", &set.access_token).is_err());
+        assert!(verify(&k, IssuerCheck::Exact("http://other"), &set.access_token).is_err());
         assert!(verify(
             &SigningKey::from_seed("other"),
-            "http://issuer/oidc",
+            IssuerCheck::Exact("http://issuer/oidc"),
             &set.access_token
         )
         .is_err());
+        // path-only: any host with the same path is fine, other path is not
+        assert!(verify(&k, IssuerCheck::PathOnly("/oidc"), &set.access_token).is_ok());
+        assert!(verify(&k, IssuerCheck::PathOnly("/other"), &set.access_token).is_err());
+        assert!(verify(&k, IssuerCheck::PathOnly(""), &set.access_token).is_err());
     }
 
     #[test]

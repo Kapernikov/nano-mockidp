@@ -11,6 +11,7 @@ use crate::error::OAuthError;
 use crate::state::SharedState;
 use crate::store::{now_secs, random_token, Claims, Expiring, RefreshEntry};
 use crate::token::{pkce_verify, IssueParams, TokenSet};
+use crate::urls::RequestBase;
 
 #[derive(Debug, Deserialize, Default)]
 pub struct TokenForm {
@@ -115,9 +116,11 @@ fn new_refresh(state: &SharedState, entry: RefreshEntry) -> String {
 
 pub async fn handler(
     State(state): State<SharedState>,
+    RequestBase(base): RequestBase,
     headers: HeaderMap,
     Form(form): Form<TokenForm>,
 ) -> Result<Response, OAuthError> {
+    let issuer = state.issuer_for(&base);
     let client_id = authenticate_client(
         &state,
         &headers,
@@ -161,7 +164,7 @@ pub async fn handler(
                     return Err(OAuthError::invalid_grant("PKCE verification failed"));
                 }
             }
-            let set = state.token_issuer().issue(IssueParams {
+            let set = state.token_issuer(&issuer).issue(IssueParams {
                 client_id: client_id.clone(),
                 scope: entry.req.scope.clone(),
                 nonce: entry.req.nonce.clone(),
@@ -200,7 +203,7 @@ pub async fn handler(
                     "refresh token was issued to a different client",
                 ));
             }
-            let set = state.token_issuer().issue(IssueParams {
+            let set = state.token_issuer(&issuer).issue(IssueParams {
                 client_id: client_id.clone(),
                 scope: entry.scope.clone(),
                 nonce: None,
@@ -219,7 +222,7 @@ pub async fn handler(
             if let Some(aud) = form.audience.as_deref().filter(|s| !s.is_empty()) {
                 claims.insert("aud".into(), json!(aud));
             }
-            let set = state.token_issuer().issue(IssueParams {
+            let set = state.token_issuer(&issuer).issue(IssueParams {
                 client_id,
                 scope: form.scope.clone(),
                 nonce: None,

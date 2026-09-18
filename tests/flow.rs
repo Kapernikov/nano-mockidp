@@ -875,3 +875,190 @@ async fn register() {
     let r = s.client.post(s.url("/register")).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::CREATED);
 }
+
+// ---------- ISSUER_FROM_REQUEST_HOST ----------
+
+#[tokio::test]
+async fn issuer_follows_request_host_when_enabled() {
+    let s = spawn(&[
+        ("ISSUER_URL", "http://localhost:4200/mock-oauth"),
+        ("ISSUER_FROM_REQUEST_HOST", "true"),
+    ])
+    .await;
+    // discovery: issuer + browser endpoints follow Host
+    let d: Value = s
+        .client
+        .get(s.url("/.well-known/openid-configuration"))
+        .header("Host", "localhost:4253")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(d["issuer"], "http://localhost:4253/mock-oauth");
+    assert_eq!(
+        d["authorization_endpoint"],
+        "http://localhost:4253/mock-oauth/authorize"
+    );
+    assert_eq!(
+        d["end_session_endpoint"],
+        "http://localhost:4253/mock-oauth/end_session"
+    );
+    assert_eq!(
+        d["token_endpoint"],
+        "http://localhost:4253/mock-oauth/token"
+    );
+
+    // full flow through a proxied host: iss in tokens follows Host of the /token request
+    let code = get_code(
+        &s,
+        "",
+        &[("username", "alice"), ("claims", r#"{"email":"a@b"}"#)],
+    )
+    .await;
+    let r = s
+        .client
+        .post(s.url("/token"))
+        .header("Host", "localhost:4253")
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code.as_str()),
+            ("redirect_uri", CB),
+            ("client_id", "app"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body: Value = r.json().await.unwrap();
+    let (_, id) = decode_jwt_unverified(body["id_token"].as_str().unwrap());
+    assert_eq!(id["iss"], "http://localhost:4253/mock-oauth");
+    let (_, at) = decode_jwt_unverified(body["access_token"].as_str().unwrap());
+    assert_eq!(at["iss"], "http://localhost:4253/mock-oauth");
+
+    // userinfo over the internal hostname with X-Forwarded-Host (no port) + X-Forwarded-Port
+    let r = s
+        .client
+        .get(s.url("/userinfo"))
+        .header("Host", "idp:8778")
+        .header("X-Forwarded-Host", "localhost")
+        .header("X-Forwarded-Port", "4253")
+        .header("X-Forwarded-Proto", "http")
+        .bearer_auth(body["access_token"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let u: Value = r.json().await.unwrap();
+    assert_eq!(u["sub"], "alice");
+    // ...and with no forwarded headers at all (any host, same path)
+    let r = s
+        .client
+        .get(s.url("/userinfo"))
+        .header("Host", "idp:8778")
+        .bearer_auth(body["access_token"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    // introspect likewise
+    let i: Value = s
+        .client
+        .post(s.url("/introspect"))
+        .header("Host", "idp:8778")
+        .form(&[("token", body["access_token"].as_str().unwrap())])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(i["active"], true);
+
+    // refresh via another host → iss follows that host
+    let r = s
+        .client
+        .post(s.url("/token"))
+        .header("Host", "localhost:4201")
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", body["refresh_token"].as_str().unwrap()),
+            ("client_id", "app"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let b2: Value = r.json().await.unwrap();
+    let (_, at2) = decode_jwt_unverified(b2["access_token"].as_str().unwrap());
+    assert_eq!(at2["iss"], "http://localhost:4201/mock-oauth");
+}
+
+#[tokio::test]
+async fn issuer_pinned_by_default_and_token_from_other_path_rejected() {
+    let s = spawn(&[("ISSUER_URL", "http://localhost:4200/mock-oauth")]).await;
+    let d: Value = s
+        .client
+        .get(s.url("/.well-known/openid-configuration"))
+        .header("Host", "localhost:4253")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(d["issuer"], "http://localhost:4200/mock-oauth");
+    assert_eq!(
+        d["token_endpoint"],
+        "http://localhost:4253/mock-oauth/token"
+    );
+}
+
+#[tokio::test]
+async fn x_forwarded_port_composition() {
+    let s = spawn(&[("ISSUER_URL", "http://x/p")]).await;
+    let disc = |hdrs: Vec<(&'static str, &'static str)>| {
+        let mut r = s.client.get(s.url("/.well-known/openid-configuration"));
+        for (k, v) in hdrs {
+            r = r.header(k, v);
+        }
+        r
+    };
+    let d: Value = disc(vec![
+        ("X-Forwarded-Host", "localhost"),
+        ("X-Forwarded-Port", "4253"),
+    ])
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(d["jwks_uri"], "http://localhost:4253/p/jwks");
+    // default port omitted
+    let d: Value = disc(vec![
+        ("X-Forwarded-Proto", "https"),
+        ("X-Forwarded-Host", "idp.test"),
+        ("X-Forwarded-Port", "443"),
+    ])
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(d["jwks_uri"], "https://idp.test/p/jwks");
+    // host already has a port: X-Forwarded-Port ignored
+    let d: Value = disc(vec![
+        ("X-Forwarded-Host", "localhost:4200"),
+        ("X-Forwarded-Port", "9999"),
+    ])
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(d["jwks_uri"], "http://localhost:4200/p/jwks");
+}

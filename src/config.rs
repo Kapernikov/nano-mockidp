@@ -21,6 +21,8 @@ pub struct Config {
     /// Path component of `issuer_url` without trailing slash ("" for root).
     pub issuer_path: String,
     pub endpoints_from_request_host: bool,
+    /// Opt-in: derive `iss`, `issuer`, authorization/end_session endpoints from the request host.
+    pub issuer_from_request_host: bool,
     pub internal_url: Option<Url>,
     pub strict: bool,
     pub clients: Vec<ClientConfig>,
@@ -92,6 +94,10 @@ impl Config {
             Some(v) => parse_bool(v).map_err(|e| format!("ENDPOINTS_FROM_REQUEST_HOST: {e}"))?,
             None => true,
         };
+        let issuer_from_request_host = match get("ISSUER_FROM_REQUEST_HOST") {
+            Some(v) => parse_bool(v).map_err(|e| format!("ISSUER_FROM_REQUEST_HOST: {e}"))?,
+            None => false,
+        };
         let internal_url = match get("INTERNAL_URL") {
             Some(v) => Some(parse_url("INTERNAL_URL", v)?),
             None => None,
@@ -132,6 +138,7 @@ impl Config {
             issuer_url,
             issuer_path,
             endpoints_from_request_host,
+            issuer_from_request_host,
             internal_url,
             strict,
             clients,
@@ -172,6 +179,7 @@ mod tests {
         assert_eq!(c.issuer(), "http://localhost:8080");
         assert_eq!(c.issuer_path, "");
         assert!(c.endpoints_from_request_host);
+        assert!(!c.issuer_from_request_host);
         assert!(!c.strict);
         assert_eq!(c.access_token_ttl, 3600);
         assert_eq!(c.refresh_token_ttl, 2_592_000);

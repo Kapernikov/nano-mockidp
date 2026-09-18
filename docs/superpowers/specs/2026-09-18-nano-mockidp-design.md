@@ -40,6 +40,7 @@ sign/verify, `serde`/`serde_json`, `rand_chacha` for seeded key derivation,
 |---|---|---|
 | `PORT` | `8080` | Listen port (binds `0.0.0.0`). |
 | `ISSUER_URL` | `http://localhost:8080` | Public issuer. Value of the `iss` claim and of `issuer`, `authorization_endpoint`, `end_session_endpoint` in discovery. Its path component is the mount path for all routes (e.g. `http://localhost:8080/oidc` → routes under `/oidc/`). |
+| `ISSUER_FROM_REQUEST_HOST` | `false` | Opt-in (added v0.2.0): `iss`, `issuer`, `authorization_endpoint`, `end_session_endpoint` derive from the request scheme/host + `ISSUER_URL` path. `/userinfo` and `/introspect` then verify only signature, `exp`, and that the `iss` path equals the issuer path. |
 | `ENDPOINTS_FROM_REQUEST_HOST` | `true` | Build backend-facing endpoint URLs in discovery from the requesting `Host` (honouring `X-Forwarded-Proto`/`X-Forwarded-Host`). |
 | `INTERNAL_URL` | unset | If set, backend-facing endpoints use this base URL instead (overrides host derivation). |
 | `STRICT` | `false` | Strict mode: only known clients, redirect_uri must match, PKCE required for public clients, client_secret checked. Permissive mode accepts anything. |
@@ -82,6 +83,11 @@ Rules:
    `ENDPOINTS_FROM_REQUEST_HOST=true`); else `ISSUER_URL`. The path component is
    always taken from `ISSUER_URL`.
 4. The server never validates `Host`; every endpoint works on any hostname.
+5. Request host derivation: `X-Forwarded-Proto` (default `http`), `X-Forwarded-Host`
+   (+ `:X-Forwarded-Port` when the forwarded host carries no port and the port is not the
+   scheme default), else `Host`.
+6. With `ISSUER_FROM_REQUEST_HOST=true`, rule 1 and 2 use the request host instead of
+   `ISSUER_URL` (path unchanged). Needed when the browser-facing port is dynamic.
 
 Result: a backend fetching discovery via the service hostname gets endpoints it
 can reach and an `issuer` equal to what it configured; the browser gets

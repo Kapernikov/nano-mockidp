@@ -35,7 +35,7 @@ pub async fn handler(
         return Err(OAuthError::invalid_request("token is required"));
     };
 
-    if let Ok(mut claims) = verify(&state.key, state.issuer(), token) {
+    if let Ok(mut claims) = verify(&state.key, state.issuer_check(), token) {
         claims.insert("active".into(), json!(true));
         claims.insert("token_type".into(), json!("Bearer"));
         if let Some(aud) = claims.get("aud").cloned() {

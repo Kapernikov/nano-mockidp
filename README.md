@@ -36,6 +36,7 @@ your app generates. You get the login page: enter a username, optionally edit th
 |---|---|---|
 | `PORT` | `8080` | Listen port (binds `0.0.0.0`). |
 | `ISSUER_URL` | `http://localhost:8080` | Public issuer URL. Value of the `iss` claim and of `issuer`, `authorization_endpoint`, `end_session_endpoint` in discovery. Its **path is the mount path** for all routes (`http://localhost:8080/oidc` → everything under `/oidc/`). |
+| `ISSUER_FROM_REQUEST_HOST` | `false` | Opt-in: `iss`, `issuer`, `authorization_endpoint`, `end_session_endpoint` follow the requesting host too (like mock-oauth2-server). Path still comes from `ISSUER_URL`. `/userinfo` and `/introspect` then accept tokens from any host with that path. Use when the browser-facing port is not known in advance (devcontainer forwarded ports, one port per worktree). |
 | `ENDPOINTS_FROM_REQUEST_HOST` | `true` | Derive backend-facing endpoint URLs in discovery from the requesting `Host` (honours `X-Forwarded-Proto` / `X-Forwarded-Host`). See below. |
 | `INTERNAL_URL` | – | If set, backend-facing endpoints use this base URL instead of the request host. |
 | `STRICT` | `false` | Strict mode: only known clients, `redirect_uri` must be registered, `client_secret` checked, PKCE required for public clients. |
@@ -85,6 +86,13 @@ nano-mockidp handles this so you don't have to rewrite URLs in the relying party
    (or `X-Forwarded-*`), with the path from `ISSUER_URL`. Override with `INTERNAL_URL`, or
    disable with `ENDPOINTS_FROM_REQUEST_HOST=false` to get fixed `ISSUER_URL`-based URLs.
 3. The server never validates `Host`; every endpoint works on any hostname.
+4. Request host = `X-Forwarded-Proto` + `X-Forwarded-Host` (+ `X-Forwarded-Port` when the
+   forwarded host has none and the port is non-default), else `Host`.
+
+If you *cannot* know the browser-facing URL in advance (e.g. VS Code forwards a random port and
+the SPA computes the issuer from `window.location.origin`), set `ISSUER_FROM_REQUEST_HOST=true`:
+the issuer then follows the request host exactly like mock-oauth2-server does, and token
+verification on `/userinfo` / `/introspect` only checks signature, expiry and the issuer *path*.
 
 So the backend fetches `http://mockidp:8080/.well-known/openid-configuration`, gets
 `issuer = http://localhost:8080` (what it configured) and `jwks_uri = http://mockidp:8080/jwks`

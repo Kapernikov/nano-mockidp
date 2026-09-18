@@ -20,10 +20,41 @@ impl<S: Send + Sync> FromRequestParts<S> for RequestBase {
                 .filter(|v| !v.is_empty())
         };
         let scheme = header("x-forwarded-proto").unwrap_or_else(|| "http".to_string());
-        let host = header("x-forwarded-host")
+        let forwarded_host = header("x-forwarded-host");
+        let mut host = forwarded_host
+            .clone()
             .or_else(|| header("host"))
             .unwrap_or_else(|| "localhost".to_string());
+        // X-Forwarded-Host without a port + X-Forwarded-Port: append the port when non-default.
+        if forwarded_host.is_some() && !host_has_port(&host) {
+            if let Some(port) = header("x-forwarded-port") {
+                let default = matches!(
+                    (scheme.as_str(), port.as_str()),
+                    ("http", "80") | ("https", "443")
+                );
+                if !default {
+                    host = format!("{host}:{port}");
+                }
+            }
+        }
         Ok(RequestBase(format!("{scheme}://{host}")))
+    }
+}
+
+fn host_has_port(host: &str) -> bool {
+    if let Some(end) = host.rfind(']') {
+        // IPv6 literal: [::1]:8080
+        return host[end..].contains(':');
+    }
+    host.contains(':')
+}
+
+/// The issuer for a given request: `ISSUER_URL`, or request base + issuer path when
+/// `ISSUER_FROM_REQUEST_HOST` is on.
+pub fn issuer_for(cfg: &Config, request_base: Option<&str>) -> String {
+    match (cfg.issuer_from_request_host, request_base) {
+        (true, Some(base)) => format!("{}{}", base.trim_end_matches('/'), cfg.issuer_path),
+        _ => cfg.issuer(),
     }
 }
 
@@ -43,7 +74,7 @@ impl Endpoints {
     /// Browser-facing URLs always come from `ISSUER_URL`. Backend-facing URLs come from
     /// `INTERNAL_URL`, else the request base (if enabled), else `ISSUER_URL`.
     pub fn resolve(cfg: &Config, request_base: Option<&str>) -> Endpoints {
-        let public = cfg.issuer();
+        let public = issuer_for(cfg, request_base);
         let path = &cfg.issuer_path;
         let internal = match (
             &cfg.internal_url,
@@ -109,6 +140,42 @@ mod tests {
         ]);
         let e = Endpoints::resolve(&c, Some("http://backend:9"));
         assert_eq!(e.jwks, "http://public.example/jwks");
+    }
+
+    #[test]
+    fn issuer_from_request_host_opt_in() {
+        let c = cfg(&[
+            ("ISSUER_URL", "http://localhost:4200/mock-oauth"),
+            ("ISSUER_FROM_REQUEST_HOST", "true"),
+        ]);
+        let e = Endpoints::resolve(&c, Some("http://localhost:4253"));
+        assert_eq!(e.issuer, "http://localhost:4253/mock-oauth");
+        assert_eq!(
+            e.authorization,
+            "http://localhost:4253/mock-oauth/authorize"
+        );
+        assert_eq!(
+            e.end_session,
+            "http://localhost:4253/mock-oauth/end_session"
+        );
+        assert_eq!(e.token, "http://localhost:4253/mock-oauth/token");
+        assert_eq!(issuer_for(&c, Some("https://x")), "https://x/mock-oauth");
+        // without request base falls back to ISSUER_URL
+        assert_eq!(issuer_for(&c, None), "http://localhost:4200/mock-oauth");
+        // off by default
+        let c = cfg(&[("ISSUER_URL", "http://localhost:4200/mock-oauth")]);
+        assert_eq!(
+            issuer_for(&c, Some("http://localhost:4253")),
+            "http://localhost:4200/mock-oauth"
+        );
+    }
+
+    #[test]
+    fn host_port_detection() {
+        assert!(host_has_port("a:1"));
+        assert!(!host_has_port("a"));
+        assert!(host_has_port("[::1]:8080"));
+        assert!(!host_has_port("[::1]"));
     }
 
     #[test]

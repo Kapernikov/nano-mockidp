@@ -37,7 +37,7 @@ pub async fn handler(State(state): State<SharedState>, headers: HeaderMap) -> Re
     let Some(token) = bearer(&headers) else {
         return unauthorized("missing bearer token");
     };
-    match verify(&state.key, state.issuer(), token) {
+    match verify(&state.key, state.issuer_check(), token) {
         Ok(mut claims) => {
             for k in STRIP {
                 claims.remove(*k);

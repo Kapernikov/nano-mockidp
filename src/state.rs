@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::config::Config;
 use crate::keys::SigningKey;
 use crate::store::{Client, Store};
-use crate::token::Issuer;
+use crate::token::{Issuer, IssuerCheck};
+use crate::urls;
 
 pub struct AppState {
     pub config: Config,
@@ -45,10 +46,24 @@ impl AppState {
         &self.issuer_str
     }
 
-    pub fn token_issuer(&self) -> Issuer<'_> {
+    /// The issuer to put in tokens for a request arriving at `request_base`.
+    pub fn issuer_for(&self, request_base: &str) -> String {
+        urls::issuer_for(&self.config, Some(request_base))
+    }
+
+    /// How incoming tokens' `iss` must be checked.
+    pub fn issuer_check(&self) -> IssuerCheck<'_> {
+        if self.config.issuer_from_request_host {
+            IssuerCheck::PathOnly(&self.config.issuer_path)
+        } else {
+            IssuerCheck::Exact(&self.issuer_str)
+        }
+    }
+
+    pub fn token_issuer<'a>(&'a self, issuer: &'a str) -> Issuer<'a> {
         Issuer {
             key: &self.key,
-            issuer: &self.issuer_str,
+            issuer,
             access_ttl: self.config.access_token_ttl,
             id_ttl: self.config.id_token_ttl,
         }
