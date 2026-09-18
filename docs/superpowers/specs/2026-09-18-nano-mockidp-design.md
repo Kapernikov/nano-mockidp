@@ -236,7 +236,11 @@ path.
 
 ### Default page
 
-Embedded in the binary. Minimal, no external assets. Contains:
+Embedded in the binary. No external assets. Kapernikov branding: inline
+horizontal Kapernikov SVG logo (from the official logo pack), colour palette
+from the Kapernikov theme (`--kpv-primary: #ba2415`, dark grey `#484847`,
+medium grey `#818281`, light grey `#bfc0c0`, very light grey `#ececec`, beige
+`#e2d7cd`), system sans-serif font stack. Contains:
 
 - text input `username`
 - textarea `claims` prefilled with `{"email": "user@example.com", "name": "Test User"}`
