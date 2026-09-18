@@ -12,15 +12,15 @@ environment variables, optional bind-mount for a custom login page.
 - Dynamic Client Registration (RFC 7591).
 - Customizable HTML login form: server only cares about two form fields
   (`username`, `claims`). Project-specific presets live in the user's own HTML.
-- Deterministic signing key by default so relying parties that cache JWKS survive
-  IdP restarts.
+- Optional deterministic signing key (from a seed string) for relying parties
+  that cache JWKS across IdP restarts.
 - Solve the "browser sees `localhost`, backend sees `service-name`" problem in
   the IdP instead of in every relying party.
 
 ## Non-goals
 
-- Persistence across restarts (state is in memory; the stable key makes this a
-  non-issue for dev/CI).
+- Persistence across restarts (state is in memory; a seeded key is available if
+  a stable JWKS is wanted).
 - TLS (terminated by ingress / not needed locally).
 - Token revocation endpoint (RFC 7009).
 - Multiple issuers per instance.
@@ -48,13 +48,13 @@ sign/verify, `serde`/`serde_json`, `rand_chacha` for seeded key derivation,
 | `ACCESS_TOKEN_TTL` | `3600` | Seconds. |
 | `ID_TOKEN_TTL` | `3600` | Seconds. |
 | `REFRESH_TOKEN_TTL` | `2592000` | Seconds (30 days). |
-| `SIGNING_KEY_SEED` | `nano-mockidp-default-seed` | Any string → deterministic RSA-2048 key. Special value `random` → fresh key each start. |
+| `SIGNING_KEY_SEED` | unset | Any string → deterministic RSA-2048 key (same string ⇒ same key/`kid`). Unset ⇒ fresh random key each start. |
 | `SIGNING_KEY_PEM` | unset | PKCS#1 or PKCS#8 PEM private key inline. Takes precedence over seed. |
 | `SIGNING_KEY_PATH` | unset | Path to PEM file. Takes precedence over seed. |
 | `CORS_ALLOWED_ORIGINS` | `*` | Comma-separated origins, or `*`. |
 | `LOG_LEVEL` | `info` | `tracing` filter. |
 
-Startup logs a warning when the default seed is in use.
+Startup logs the `kid` and whether the key is random, seeded, or loaded from PEM.
 
 ### Deterministic key derivation
 
