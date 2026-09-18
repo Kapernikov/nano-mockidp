@@ -1,0 +1,31 @@
+[package]
+name = "nano-mockidp"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+description = "Lightweight mock OpenID Connect provider for dev and CI"
+repository = "https://github.com/Kapernikov/nano-mockidp"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+jsonwebtoken = "9"
+rsa = { version = "0.9", features = ["pem", "sha2"] }
+rand = "0.8"
+rand_chacha = "0.3"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+base64 = "0.22"
+url = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json"], default-features = false }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
