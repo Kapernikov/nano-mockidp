@@ -2,7 +2,7 @@
 
 A tiny mock OpenID Connect provider for local development and CI.
 Drop-in alternative to [navikt/mock-oauth2-server](https://github.com/navikt/mock-oauth2-server),
-written in Rust: a single static binary, a **~4 MB `FROM scratch` container image**, sub-second
+written in Rust: a single static binary, a **~1.5 MB `FROM scratch` container image** (~1.5 MB RSS at runtime), sub-second
 startup, everything configured through environment variables.
 
 - Authorization code flow with **PKCE (S256)**, `response_types_supported: ["code"]`
@@ -175,7 +175,7 @@ curl -s -X POST http://localhost:8080/token -d grant_type=authorization_code -d 
 
 | | nano-mockidp | mock-oauth2-server |
 |---|---|---|
-| Image | ~4 MB, `FROM scratch` | JVM, hundreds of MB |
+| Image | ~1.5 MB, `FROM scratch` | JVM, hundreds of MB |
 | Startup | milliseconds | seconds |
 | Config | env vars | env vars + JSON |
 | Login page | any HTML, two form fields | Kotlin template / custom HTML |

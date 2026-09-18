@@ -7,9 +7,8 @@ description = "Lightweight mock OpenID Connect provider for dev and CI"
 repository = "https://github.com/Kapernikov/nano-mockidp"
 
 [dependencies]
-axum = "0.8"
-tokio = { version = "1", features = ["full"] }
-jsonwebtoken = "9"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "form", "query"] }
+tokio = { version = "1", features = ["rt", "net", "macros", "time"] }
 rsa = { version = "0.9", features = ["pem", "sha2"] }
 rand = "0.8"
 rand_chacha = "0.3"
@@ -21,12 +20,16 @@ base64 = "0.22"
 url = "2"
 serde_urlencoded = "0.7"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"], default-features = false }
+jsonwebtoken = "9"
+tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [profile.release]
+opt-level = "z"
 lto = true
 codegen-units = 1
+panic = "abort"
 strip = true

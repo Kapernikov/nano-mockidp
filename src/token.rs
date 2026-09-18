@@ -1,6 +1,6 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use jsonwebtoken::{Algorithm, Header, Validation};
+use rsa::signature::{SignatureEncoding, Signer, Verifier};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -110,11 +110,14 @@ impl<'a> Issuer<'a> {
     }
 
     fn sign(&self, claims: &Claims, typ: &str) -> String {
-        let mut header = Header::new(Algorithm::RS256);
-        header.kid = Some(self.key.kid.clone());
-        header.typ = Some(typ.to_string());
-        jsonwebtoken::encode(&header, &Value::Object(claims.clone()), &self.key.encoding)
-            .expect("jwt sign")
+        let header = json!({ "typ": typ, "alg": "RS256", "kid": self.key.kid });
+        let mut token = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("json"));
+        token.push('.');
+        token.push_str(&URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).expect("json")));
+        let sig = self.key.signer.sign(token.as_bytes());
+        token.push('.');
+        token.push_str(&URL_SAFE_NO_PAD.encode(sig.to_bytes()));
+        token
     }
 }
 
@@ -130,26 +133,56 @@ pub enum IssuerCheck<'a> {
 
 /// Verify signature, `exp` and `iss` of a token issued by this server. Returns the claims.
 pub fn verify(key: &SigningKey, issuer: IssuerCheck<'_>, token: &str) -> Result<Claims, String> {
-    let mut validation = Validation::new(Algorithm::RS256);
-    validation.validate_aud = false;
-    validation.leeway = 0;
-    match issuer {
-        IssuerCheck::Exact(iss) => validation.set_issuer(&[iss]),
-        IssuerCheck::PathOnly(_) => {
-            validation.required_spec_claims.remove("iss");
-        }
+    let mut parts = token.split('.');
+    let (Some(h), Some(p), Some(sig), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err("token is not a compact JWS (expected 3 segments)".into());
+    };
+    let header: Value = serde_json::from_slice(
+        &URL_SAFE_NO_PAD
+            .decode(h)
+            .map_err(|e| format!("bad header encoding: {e}"))?,
+    )
+    .map_err(|e| format!("bad header json: {e}"))?;
+    if header.get("alg").and_then(Value::as_str) != Some("RS256") {
+        return Err("unsupported alg (expected RS256)".into());
     }
-    let data = jsonwebtoken::decode::<Value>(token, &key.decoding, &validation)
-        .map_err(|e| e.to_string())?;
-    let claims = match data.claims {
+    let sig_bytes = URL_SAFE_NO_PAD
+        .decode(sig)
+        .map_err(|e| format!("bad signature encoding: {e}"))?;
+    let signature = rsa::pkcs1v15::Signature::try_from(sig_bytes.as_slice())
+        .map_err(|e| format!("bad signature: {e}"))?;
+    key.verifier
+        .verify(&token.as_bytes()[..h.len() + 1 + p.len()], &signature)
+        .map_err(|_| "invalid signature".to_string())?;
+    let claims: Claims = match serde_json::from_slice::<Value>(
+        &URL_SAFE_NO_PAD
+            .decode(p)
+            .map_err(|e| format!("bad payload encoding: {e}"))?,
+    )
+    .map_err(|e| format!("bad payload json: {e}"))?
+    {
         Value::Object(m) => m,
         _ => return Err("claims are not an object".into()),
     };
+    let exp = claims
+        .get("exp")
+        .and_then(Value::as_u64)
+        .ok_or("missing exp claim")?;
+    if exp <= now_secs() {
+        return Err("token expired".into());
+    }
+    let iss = claims
+        .get("iss")
+        .and_then(|v| v.as_str())
+        .ok_or("missing iss claim")?;
+    if let IssuerCheck::Exact(expected) = issuer {
+        if iss != expected {
+            return Err(format!("issuer mismatch: {iss:?} != {expected:?}"));
+        }
+    }
     if let IssuerCheck::PathOnly(path) = issuer {
-        let iss = claims
-            .get("iss")
-            .and_then(|v| v.as_str())
-            .ok_or("missing iss claim")?;
         let url = url::Url::parse(iss).map_err(|e| format!("iss is not a URL: {e}"))?;
         if url.path().trim_end_matches('/') != path {
             return Err(format!(

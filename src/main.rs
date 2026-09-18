@@ -1,7 +1,10 @@
 use nano_mockidp::{build, spawn_sweeper, Config};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::Targets;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
-#[tokio::main]
+// A mock IdP has no use for a thread per core; one thread keeps the footprint minimal.
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     let config = match Config::from_env() {
         Ok(c) => c,
@@ -10,8 +13,17 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(&config.log_level))
+    // `Targets` understands the usual `info,tower_http=debug` syntax without pulling in regex.
+    let filter: Targets = match config.log_level.parse() {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("LOG_LEVEL: invalid filter {:?}: {e}", config.log_level);
+            std::process::exit(2);
+        }
+    };
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_ansi(false))
         .init();
     let port = config.port;
     let (state, router) = match build(config) {

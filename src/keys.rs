@@ -1,9 +1,10 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use jsonwebtoken::{DecodingKey, EncodingKey};
 use rand::SeedableRng;
 use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey};
+use rsa::pkcs1v15::{SigningKey as RsaSigningKey, VerifyingKey as RsaVerifyingKey};
 use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey, LineEnding};
+use rsa::signature::Keypair;
 use rsa::traits::PublicKeyParts;
 use rsa::RsaPrivateKey;
 use sha2::{Digest, Sha256};
@@ -29,8 +30,8 @@ impl std::fmt::Display for KeySource {
 
 pub struct SigningKey {
     pub kid: String,
-    pub encoding: EncodingKey,
-    pub decoding: DecodingKey,
+    pub signer: RsaSigningKey<Sha256>,
+    pub verifier: RsaVerifyingKey<Sha256>,
     pub jwk: serde_json::Value,
     pub source: KeySource,
     private_pem: String,
@@ -88,8 +89,8 @@ impl SigningKey {
             .to_string();
         let n = URL_SAFE_NO_PAD.encode(public.n().to_bytes_be());
         let e = URL_SAFE_NO_PAD.encode(public.e().to_bytes_be());
-        let encoding = EncodingKey::from_rsa_pem(private_pem.as_bytes()).expect("encoding key");
-        let decoding = DecodingKey::from_rsa_components(&n, &e).expect("decoding key");
+        let signer = RsaSigningKey::<Sha256>::new(key);
+        let verifier = signer.verifying_key();
         let jwk = serde_json::json!({
             "kty": "RSA",
             "use": "sig",
@@ -100,8 +101,8 @@ impl SigningKey {
         });
         SigningKey {
             kid,
-            encoding,
-            decoding,
+            signer,
+            verifier,
             jwk,
             source,
             private_pem,
