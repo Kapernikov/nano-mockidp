@@ -1,13 +1,4 @@
-mod config;
-mod error;
-mod keys;
-mod state;
-mod store;
-mod token;
-mod urls;
-
-use config::Config;
-use keys::SigningKey;
+use nano_mockidp::{build, spawn_sweeper, Config};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -22,13 +13,31 @@ async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::new(&config.log_level))
         .init();
-    let key = match SigningKey::load(&config) {
-        Ok(k) => k,
+    let port = config.port;
+    let (state, router) = match build(config) {
+        Ok(x) => x,
         Err(e) => {
-            tracing::error!("signing key error: {e}");
+            tracing::error!("startup error: {e}");
             std::process::exit(2);
         }
     };
-    tracing::info!(kid = %key.kid, source = %key.source, issuer = %config.issuer(), "nano-mockidp starting");
-    tracing::info!(port = config.port, "listening");
+    tracing::info!(
+        kid = %state.key.kid,
+        key_source = %state.key.source,
+        issuer = %state.issuer(),
+        strict = state.config.strict,
+        "nano-mockidp starting"
+    );
+    spawn_sweeper(state.clone());
+    let listener = match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("cannot bind port {port}: {e}");
+            std::process::exit(1);
+        }
+    };
+    tracing::info!(port, "listening");
+    if let Err(e) = axum::serve(listener, router).await {
+        tracing::error!("server error: {e}");
+    }
 }
