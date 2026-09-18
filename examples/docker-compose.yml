@@ -1,0 +1,22 @@
+services:
+  mockidp:
+    image: ghcr.io/kapernikov/nano-mockidp:latest
+    ports:
+      - "8080:8080"
+    environment:
+      # What the browser sees. Also the `iss` claim.
+      ISSUER_URL: http://localhost:8080
+      # Backend-facing endpoints (token, jwks, userinfo, ...) are derived from the
+      # Host header by default, so a backend fetching discovery via
+      # http://mockidp:8080 gets URLs it can reach, with issuer still = ISSUER_URL.
+      LOGIN_PAGE_PATH: /login.html
+      # SIGNING_KEY_SEED: my-project   # uncomment for a stable JWKS across restarts
+    volumes:
+      - ./login.html:/login.html:ro
+
+  backend:
+    image: your/backend
+    environment:
+      OIDC_ISSUER: http://localhost:8080            # must equal ISSUER_URL (iss claim)
+      OIDC_DISCOVERY_URL: http://mockidp:8080/.well-known/openid-configuration
+    depends_on: [mockidp]

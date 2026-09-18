@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sign in — my-project (mock)</title>
+<style>
+  body { font: 15px system-ui, sans-serif; max-width: 520px; margin: 40px auto; padding: 0 16px; color: #222; }
+  label { display: block; margin-top: 14px; font-weight: 600; font-size: 13px; }
+  input, textarea { width: 100%; box-sizing: border-box; padding: 8px; font: inherit; }
+  textarea { font-family: monospace; min-height: 140px; }
+  .presets button { margin: 4px 4px 0 0; }
+  .go { margin-top: 16px; padding: 10px 16px; background: #ba2415; color: #fff; border: 0; cursor: pointer; }
+</style>
+</head>
+<body>
+  <h1>my-project — mock sign in</h1>
+  <p>Pick a test persona or edit the claims directly.</p>
+
+  <!--
+    Contract with nano-mockidp:
+      * <form method="post"> with NO action -> posts back to the same URL, keeping the OAuth query params
+      * field "username"  -> becomes `sub` (unless claims contain "sub")
+      * field "claims"    -> optional JSON object merged into the tokens
+      * field "expires_in"-> optional token lifetime override in seconds
+  -->
+  <form method="post">
+    <div class="presets">
+      <button type="button" data-user="alice"  data-claims='{"email":"alice@acme.test","name":"Alice Admin","roles":["admin"],"tenant":"acme"}'>Alice (admin, acme)</button>
+      <button type="button" data-user="bob"    data-claims='{"email":"bob@acme.test","name":"Bob Viewer","roles":["viewer"],"tenant":"acme"}'>Bob (viewer, acme)</button>
+      <button type="button" data-user="carol"  data-claims='{"email":"carol@globex.test","name":"Carol","roles":["admin"],"tenant":"globex"}'>Carol (admin, globex)</button>
+      <button type="button" data-user="nobody" data-claims='{}'>No claims</button>
+    </div>
+
+    <label for="username">Username (sub)</label>
+    <input id="username" name="username" value="alice" required>
+
+    <label for="claims">Claims (JSON)</label>
+    <textarea id="claims" name="claims">{"email":"alice@acme.test","name":"Alice Admin","roles":["admin"],"tenant":"acme"}</textarea>
+
+    <label for="expires_in">Token lifetime (seconds, optional)</label>
+    <input id="expires_in" name="expires_in" placeholder="default">
+
+    <button class="go" type="submit">Sign in</button>
+  </form>
+
+  <script>
+    document.querySelectorAll('.presets button').forEach(function (b) {
+      b.addEventListener('click', function () {
+        document.getElementById('username').value = b.dataset.user;
+        document.getElementById('claims').value = b.dataset.claims;
+      });
+    });
+  </script>
+</body>
+</html>
