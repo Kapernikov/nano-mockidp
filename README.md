@@ -98,6 +98,14 @@ So the backend fetches `http://mockidp:8080/.well-known/openid-configuration`, g
 `issuer = http://localhost:8080` (what it configured) and `jwks_uri = http://mockidp:8080/jwks`
 (what it can reach). See [`examples/docker-compose.yml`](examples/docker-compose.yml).
 
+## Kubernetes / OpenShift
+
+The image runs as uid 65534 by default (`USER 65534:65534`), writes nothing to disk, needs no
+capabilities, and has no shell. It runs under OpenShift's `restricted` SCC (arbitrary UID,
+read-only root filesystem) and the Kubernetes `restricted` Pod Security Standard without changes.
+Use `GET /health` for readiness/liveness. See [`examples/k8s.yaml`](examples/k8s.yaml) for a
+Deployment with a ConfigMap-mounted login page and a hardened `securityContext`.
+
 ## Endpoints
 
 All relative to the path of `ISSUER_URL`.

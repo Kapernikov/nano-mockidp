@@ -1,0 +1,76 @@
+# Minimal Kubernetes / OpenShift deployment for nano-mockidp.
+# Works under OpenShift's `restricted` SCC and Kubernetes `restricted` Pod Security Standard.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mockidp-login
+data:
+  login.html: |
+    <!doctype html><title>mock sign-in</title>
+    <form method="post">
+      <input name="username" value="alice">
+      <textarea name="claims">{"email":"alice@example.test","roles":["admin"]}</textarea>
+      <button>Sign in</button>
+    </form>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mockidp
+spec:
+  replicas: 1                       # state is in memory: keep it at 1
+  selector:
+    matchLabels: { app: mockidp }
+  template:
+    metadata:
+      labels: { app: mockidp }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+        # runAsUser: 65534          # image default; OpenShift assigns its own UID — leave unset there
+      containers:
+        - name: mockidp
+          image: ghcr.io/kapernikov/nano-mockidp:0.3.0
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ISSUER_URL
+              value: https://mockidp.apps.example.com      # what the browser sees (route/ingress host)
+            - name: LOGIN_PAGE_PATH
+              value: /cfg/login.html
+            - name: SIGNING_KEY_SEED
+              value: my-project                            # stable JWKS across pod restarts
+          volumeMounts:
+            - name: login
+              mountPath: /cfg
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }
+      volumes:
+        - name: login
+          configMap: { name: mockidp-login }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mockidp
+spec:
+  selector: { app: mockidp }
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+# Backends in the cluster fetch discovery from http://mockidp:8080/.well-known/openid-configuration
+# and get issuer = ISSUER_URL, jwks_uri = http://mockidp:8080/jwks. Expose the Service with an
+# Ingress/Route on the ISSUER_URL host for the browser.
