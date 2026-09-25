@@ -21,7 +21,7 @@ pub async fn handler(
         "registration_endpoint": e.registration,
         "response_types_supported": ["code"],
         "response_modes_supported": ["query"],
-        "grant_types_supported": ["authorization_code", "refresh_token", "client_credentials"],
+        "grant_types_supported": ["authorization_code", "refresh_token", "client_credentials", "password"],
         "subject_types_supported": ["public"],
         "id_token_signing_alg_values_supported": ["RS256"],
         "code_challenge_methods_supported": ["S256"],

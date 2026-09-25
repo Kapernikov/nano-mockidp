@@ -24,6 +24,7 @@ pub struct TokenForm {
     pub client_secret: Option<String>,
     pub scope: Option<String>,
     pub audience: Option<String>,
+    pub username: Option<String>,
 }
 
 /// Credentials from HTTP Basic (preferred) or the form body.
@@ -262,6 +263,45 @@ pub async fn handler(
             let scope = entry.scope.clone();
             let refresh = new_refresh(&state, RefreshEntry { audience, ..entry });
             Ok(token_response(set, Some(refresh), scope.as_deref()))
+        }
+        Some("password") => {
+            // Resource owner password grant: any password, `username` becomes `sub`.
+            // Lets scripts and tests mint user tokens without driving the login form.
+            let username = form
+                .username
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| OAuthError::invalid_request("username is required"))?;
+            let mut claims = Claims::new();
+            claims.insert("sub".into(), json!(username));
+            let audience = resolve_audience(&form, &token_resources, None);
+            let auth_time = now_secs();
+            let with_id_token = form
+                .scope
+                .as_deref()
+                .is_some_and(|s| s.split(' ').any(|x| x == "openid"));
+            let set = state.token_issuer(&issuer).issue(IssueParams {
+                client_id: client_id.clone(),
+                audience: audience.clone(),
+                scope: form.scope.clone(),
+                nonce: None,
+                claims: claims.clone(),
+                auth_time,
+                expires_in: None,
+                with_id_token,
+            });
+            let refresh = new_refresh(
+                &state,
+                RefreshEntry {
+                    client_id,
+                    scope: form.scope.clone(),
+                    audience,
+                    claims,
+                    auth_time,
+                    expires_in: None,
+                },
+            );
+            Ok(token_response(set, Some(refresh), form.scope.as_deref()))
         }
         Some("client_credentials") => {
             let mut claims = Claims::new();

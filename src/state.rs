@@ -66,6 +66,7 @@ impl AppState {
             issuer,
             access_ttl: self.config.access_token_ttl,
             id_ttl: self.config.id_token_ttl,
+            default_claims: &self.config.default_claims,
         }
     }
 }

@@ -2,7 +2,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::Deserialize;
+use serde_json::Value;
 use url::Url;
+
+use crate::store::Claims;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ClientConfig {
@@ -27,6 +30,8 @@ pub struct Config {
     pub strict: bool,
     pub clients: Vec<ClientConfig>,
     pub login_page_path: Option<PathBuf>,
+    /// Claims put in every token under whatever the login form, grant or client supplies.
+    pub default_claims: Claims,
     pub access_token_ttl: u64,
     pub id_token_ttl: u64,
     pub refresh_token_ttl: u64,
@@ -113,6 +118,15 @@ impl Config {
             None => Vec::new(),
         };
         let login_page_path = get("LOGIN_PAGE_PATH").map(PathBuf::from);
+        let default_claims = match get("DEFAULT_CLAIMS") {
+            Some(v) => match serde_json::from_str::<Value>(v)
+                .map_err(|e| format!("DEFAULT_CLAIMS: invalid JSON: {e}"))?
+            {
+                Value::Object(m) => m,
+                _ => return Err("DEFAULT_CLAIMS: must be a JSON object".into()),
+            },
+            None => Claims::new(),
+        };
         let access_token_ttl = match get("ACCESS_TOKEN_TTL") {
             Some(v) => parse_u64("ACCESS_TOKEN_TTL", v)?,
             None => 3600,
@@ -143,6 +157,7 @@ impl Config {
             strict,
             clients,
             login_page_path,
+            default_claims,
             access_token_ttl,
             id_token_ttl,
             refresh_token_ttl,
@@ -204,6 +219,15 @@ mod tests {
         assert_eq!(c.clients.len(), 2);
         assert_eq!(c.clients[0].client_secret.as_deref(), Some("s"));
         assert!(c.clients[1].client_secret.is_none());
+    }
+
+    #[test]
+    fn default_claims_json() {
+        assert!(cfg(&[]).unwrap().default_claims.is_empty());
+        let c = cfg(&[("DEFAULT_CLAIMS", r#"{"role":["admin"]}"#)]).unwrap();
+        assert_eq!(c.default_claims["role"], serde_json::json!(["admin"]));
+        assert!(cfg(&[("DEFAULT_CLAIMS", "[1]")]).is_err());
+        assert!(cfg(&[("DEFAULT_CLAIMS", "{")]).is_err());
     }
 
     #[test]

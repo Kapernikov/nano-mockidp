@@ -6,7 +6,8 @@ written in Rust: a single static binary, a **~1.5 MB `FROM scratch` container im
 startup, everything configured through environment variables.
 
 - Authorization code flow with **PKCE (S256)**, `response_types_supported: ["code"]`
-- **Refresh tokens** (rotating), **client_credentials**
+- **Refresh tokens** (rotating), **client_credentials**, **password** (any password; for scripts and tests)
+- **Default claims** (`DEFAULT_CLAIMS`) put in every token, under what the login form supplies
 - **Dynamic Client Registration** (RFC 7591)
 - **Customizable HTML login form**: bring your own page with per-project test personas, or type
   claims into a textarea. Any username, any claims — the tokens contain what you enter.
@@ -42,6 +43,7 @@ your app generates. You get the login page: enter a username, optionally edit th
 | `STRICT` | `false` | Strict mode: only known clients, `redirect_uri` must be registered, `client_secret` checked, PKCE required for public clients. |
 | `CLIENTS` | `[]` | JSON array of pre-registered clients: `[{"client_id":"app","client_secret":"s","redirect_uris":["http://localhost:3000/cb"]}]`. |
 | `LOGIN_PAGE_PATH` | – | Path to a custom login HTML file. Re-read on every request, so you can edit it live. |
+| `DEFAULT_CLAIMS` | – | JSON object merged into every token (all grants). Claims from the login form (or `sub` from the grant) override it; `iss`/`exp`/`iat`/`jti` can't be set. E.g. `{"role":["admin"]}` so that a login with an empty claims field is an admin. |
 | `ACCESS_TOKEN_TTL` | `3600` | Seconds. |
 | `ID_TOKEN_TTL` | `3600` | Seconds. |
 | `REFRESH_TOKEN_TTL` | `2592000` | Seconds (30 days). |
@@ -116,7 +118,7 @@ All relative to the path of `ISSUER_URL`.
 | `GET /jwks` | One RS256 key |
 | `GET /authorize` | Renders the login page. Params: `response_type=code`, `client_id`, `redirect_uri`, `state`, `scope`, `nonce`, `code_challenge`, `code_challenge_method=S256` |
 | `POST /authorize` | Form post from the login page → `302 redirect_uri?code=…&state=…` |
-| `POST /token` | Grants: `authorization_code` (+ `code_verifier`), `refresh_token` (rotating), `client_credentials`. Client auth: Basic, body, or none. `resource` (RFC 8707, repeatable) or `audience` sets `aud`. |
+| `POST /token` | Grants: `authorization_code` (+ `code_verifier`), `refresh_token` (rotating), `client_credentials`, `password` (`username` → `sub`, password ignored; `id_token` when `scope` has `openid`). Client auth: Basic, body, or none. `resource` (RFC 8707, repeatable) or `audience` sets `aud`. |
 | `GET/POST /userinfo` | Bearer access token → claims |
 | `POST /introspect` | RFC 7662; also works for refresh tokens |
 | `GET /end_session` | Redirects to `post_logout_redirect_uri` (+`state`) or shows "Logged out" |
@@ -160,7 +162,14 @@ docker run -d -p 8080:8080 -e SIGNING_KEY_SEED=ci ghcr.io/kapernikov/nano-mockid
 curl -s -X POST http://localhost:8080/token -d grant_type=client_credentials -d client_id=ci -d client_secret=x
 ```
 
-For browser-less user tokens, drive the login form with two requests:
+For browser-less user tokens, use the password grant (`username` becomes `sub`, `DEFAULT_CLAIMS` apply):
+
+```sh
+curl -s -X POST http://localhost:8080/token -d grant_type=password -d client_id=app \
+  -d username=alice -d password=x -d scope=openid
+```
+
+or, to set per-login claims, drive the login form with two requests:
 
 ```sh
 AUTHZ='http://localhost:8080/authorize?response_type=code&client_id=app&redirect_uri=http://app/cb&state=x'

@@ -12,6 +12,8 @@ pub struct Issuer<'a> {
     pub issuer: &'a str,
     pub access_ttl: u64,
     pub id_ttl: u64,
+    /// `DEFAULT_CLAIMS`: merged over the base claims, under the user's.
+    pub default_claims: &'a Claims,
 }
 
 pub struct IssueParams {
@@ -82,6 +84,7 @@ impl<'a> Issuer<'a> {
         if let Some(scope) = &p.scope {
             base.insert("scope".into(), json!(scope));
         }
+        let base = merge_claims(base, self.default_claims.clone());
         let mut common = merge_claims(base, p.claims);
         common.insert("iss".into(), json!(self.issuer));
         common.insert("iat".into(), json!(now));
@@ -255,6 +258,7 @@ mod tests {
             issuer: "http://issuer/oidc",
             access_ttl: 100,
             id_ttl: 200,
+            default_claims: &Claims::new(),
         };
         let mut claims = Claims::new();
         claims.insert("sub".into(), json!("alice"));
@@ -310,6 +314,38 @@ mod tests {
     }
 
     #[test]
+    fn default_claims_sit_under_user_claims() {
+        let k = key();
+        let mut defaults = Claims::new();
+        defaults.insert("role".into(), json!(["admin"]));
+        defaults.insert("tenant".into(), json!("t1"));
+        defaults.insert("iss".into(), json!("evil"));
+        let iss = Issuer {
+            key: &k,
+            issuer: "i",
+            access_ttl: 10,
+            id_ttl: 10,
+            default_claims: &defaults,
+        };
+        let mut user = Claims::new();
+        user.insert("role".into(), json!(["viewer"]));
+        let set = iss.issue(IssueParams {
+            client_id: "app".into(),
+            audience: None,
+            scope: None,
+            nonce: None,
+            claims: user,
+            auth_time: 0,
+            expires_in: None,
+            with_id_token: false,
+        });
+        let (_, c) = decode_unverified(&set.access_token);
+        assert_eq!(c["role"], json!(["viewer"]));
+        assert_eq!(c["tenant"], "t1");
+        assert_eq!(c["iss"], "i");
+    }
+
+    #[test]
     fn no_id_token_when_disabled() {
         let k = key();
         let iss = Issuer {
@@ -317,6 +353,7 @@ mod tests {
             issuer: "i",
             access_ttl: 10,
             id_ttl: 10,
+            default_claims: &Claims::new(),
         };
         let set = iss.issue(IssueParams {
             client_id: "app".into(),

@@ -2,7 +2,7 @@ mod common;
 
 use common::*;
 use reqwest::StatusCode;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 const CB: &str = "http://app.example/cb";
 
@@ -584,6 +584,77 @@ async fn client_credentials() {
 }
 
 #[tokio::test]
+async fn password_grant_with_default_claims() {
+    let s = spawn(&[("DEFAULT_CLAIMS", r#"{"role":["SuperUser"],"tenant":"t1"}"#)]).await;
+    let (status, body) = post_token(
+        &s,
+        &[
+            ("grant_type", "password"),
+            ("client_id", "app"),
+            ("client_secret", "x"),
+            ("username", "alice"),
+            ("password", "whatever"),
+            ("scope", "openid profile"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["id_token"].is_string());
+    let (_, c) = decode_jwt_unverified(body["access_token"].as_str().unwrap());
+    assert_eq!(c["sub"], "alice");
+    assert_eq!(c["aud"], "app");
+    assert_eq!(c["role"], json!(["SuperUser"]));
+    assert_eq!(c["tenant"], "t1");
+
+    // refresh keeps the user and the defaults
+    let (status, body) = post_token(
+        &s,
+        &[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", body["refresh_token"].as_str().unwrap()),
+            ("client_id", "app"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, c) = decode_jwt_unverified(body["access_token"].as_str().unwrap());
+    assert_eq!(c["sub"], "alice");
+    assert_eq!(c["role"], json!(["SuperUser"]));
+
+    // no openid scope: no id_token; username is required
+    let (status, body) = post_token(
+        &s,
+        &[
+            ("grant_type", "password"),
+            ("client_id", "app"),
+            ("username", "bob"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["id_token"].is_null());
+    let (status, body) = post_token(&s, &[("grant_type", "password"), ("client_id", "app")]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_request");
+}
+
+#[tokio::test]
+async fn login_claims_override_default_claims() {
+    let s = spawn(&[("DEFAULT_CLAIMS", r#"{"role":["SuperUser"],"tenant":"t1"}"#)]).await;
+    let code = get_code(
+        &s,
+        "",
+        &[("username", "carol"), ("claims", r#"{"role":["Viewer"]}"#)],
+    )
+    .await;
+    let body = exchange(&s, &code, &[]).await;
+    let (_, c) = decode_jwt_unverified(body["access_token"].as_str().unwrap());
+    assert_eq!(c["sub"], "carol");
+    assert_eq!(c["role"], json!(["Viewer"]));
+    assert_eq!(c["tenant"], "t1");
+}
+
+#[tokio::test]
 async fn basic_auth_accepted() {
     let s = spawn(&[]).await;
     let code = get_code(&s, "", &[("username", "a")]).await;
@@ -605,7 +676,7 @@ async fn basic_auth_accepted() {
 #[tokio::test]
 async fn unsupported_grant_and_missing_client() {
     let s = spawn(&[]).await;
-    let (status, body) = post_token(&s, &[("grant_type", "password"), ("client_id", "app")]).await;
+    let (status, body) = post_token(&s, &[("grant_type", "implicit"), ("client_id", "app")]).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"], "unsupported_grant_type");
     let (status, body) = post_token(&s, &[("grant_type", "client_credentials")]).await;
