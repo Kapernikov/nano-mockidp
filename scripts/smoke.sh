@@ -96,6 +96,8 @@ login "openid" '{"roles":["admin"]}'
 check "login without offline_access" "$STATUS" 200
 if [[ "$(jq -r 'has("refresh_token")' <<<"$BODY")" == true ]]; then
   info "refresh_token issued without offline_access (REQUIRE_OFFLINE_ACCESS is off)"
+  # drop it so the admin checks below see exactly one refresh token
+  req POST /revoke "${client_auth[@]}" --data-urlencode "token=$(jq -r .refresh_token <<<"$BODY")"
 else
   pass "no refresh_token without offline_access (REQUIRE_OFFLINE_ACCESS is on)"
 fi
