@@ -78,42 +78,50 @@ fn admin(s: &TestServer, method: reqwest::Method, sub: &str) -> reqwest::Request
 // ---------- (a) offline_access ----------
 
 #[tokio::test]
-async fn refresh_token_always_issued_by_default() {
+async fn refresh_token_type_follows_offline_access() {
     let s = spawn(&[]).await;
     let (st, body) = login(&s, "openid", "").await;
     assert_eq!(st, StatusCode::OK, "{body}");
-    assert!(body["refresh_token"].is_string());
-}
-
-#[tokio::test]
-async fn require_offline_access_gates_refresh_token() {
-    let s = spawn(&[("REQUIRE_OFFLINE_ACCESS", "true")]).await;
-    let (_, body) = login(&s, "openid", "").await;
-    assert!(body["access_token"].is_string());
-    assert!(body.get("refresh_token").is_none(), "{body}");
+    let online = body["refresh_token"]
+        .as_str()
+        .expect("online refresh token");
+    let i = introspect(&s, online).await;
+    assert_eq!(i["refresh_token_type"], "online", "{i}");
 
     let (_, body) = login(&s, "openid offline_access", "").await;
-    let rt = body["refresh_token"].as_str().expect("refresh token");
-    let (st, body) = refresh(&s, rt).await;
+    let offline = body["refresh_token"]
+        .as_str()
+        .expect("offline refresh token");
+    assert_eq!(
+        introspect(&s, offline).await["refresh_token_type"],
+        "offline"
+    );
+
+    // rotation keeps the type
+    let (st, body) = refresh(&s, offline).await;
     assert_eq!(st, StatusCode::OK, "{body}");
-    assert!(
-        body["refresh_token"].is_string(),
-        "rotation keeps offline access"
+    let rotated = body["refresh_token"].as_str().unwrap();
+    assert_eq!(
+        introspect(&s, rotated).await["refresh_token_type"],
+        "offline"
     );
 
     // password grant follows the same rule
-    let (_, body) = post_form(
-        &s,
-        "/token",
-        &[
-            ("grant_type", "password"),
-            ("client_id", "app"),
-            ("username", "bob"),
-            ("scope", "openid"),
-        ],
-    )
-    .await;
-    assert!(body.get("refresh_token").is_none(), "{body}");
+    for (scope, kind) in [("openid", "online"), ("openid offline_access", "offline")] {
+        let (_, body) = post_form(
+            &s,
+            "/token",
+            &[
+                ("grant_type", "password"),
+                ("client_id", "app"),
+                ("username", "bob"),
+                ("scope", scope),
+            ],
+        )
+        .await;
+        let rt = body["refresh_token"].as_str().unwrap();
+        assert_eq!(introspect(&s, rt).await["refresh_token_type"], kind);
+    }
 }
 
 // ---------- (b) /revoke ----------
@@ -255,7 +263,12 @@ async fn admin_requires_bearer() {
     let v: Value = r.json().await.unwrap();
     assert_eq!(
         v,
-        json!({"sub": "alice", "claims": null, "disabled": false, "refresh_tokens": 0})
+        json!({
+            "sub": "alice",
+            "claims": null,
+            "disabled": false,
+            "refresh_tokens": {"online": 0, "offline": 0}
+        })
     );
 }
 
@@ -273,7 +286,7 @@ async fn refresh_reflects_current_claims() {
         .json()
         .await
         .unwrap();
-    assert_eq!(v["refresh_tokens"], 1);
+    assert_eq!(v["refresh_tokens"], json!({"online": 0, "offline": 1}));
     assert_eq!(v["claims"]["sub"], "alice", "path sub wins");
 
     let (st, body) = refresh(&s, &rt).await;
@@ -345,7 +358,7 @@ async fn disabled_subject_cannot_refresh_or_login() {
 #[tokio::test]
 async fn delete_subject_revokes_refresh_tokens() {
     let s = spawn(&[("ADMIN_TOKEN", ADMIN)]).await;
-    let (_, a) = login(&s, "openid offline_access", "").await;
+    let (_, a) = login(&s, "openid", "").await;
     let (_, b) = login(&s, "openid offline_access", "").await;
     let r: Value = admin(&s, reqwest::Method::DELETE, "alice")
         .send()
@@ -376,12 +389,14 @@ async fn delete_subject_revokes_refresh_tokens() {
 // ---------- (d) end_session ----------
 
 #[tokio::test]
-async fn end_session_with_hint_revokes_that_clients_refresh_tokens() {
+async fn end_session_revokes_only_online_refresh_tokens_of_that_client() {
     let s = spawn(&[]).await;
+    let (_, body) = login(&s, "openid", "").await;
+    let online = body["refresh_token"].as_str().unwrap().to_string();
+    let id = body["id_token"].as_str().unwrap().to_string();
     let (_, body) = login(&s, "openid offline_access", "").await;
-    let rt = body["refresh_token"].as_str().unwrap();
-    let id = body["id_token"].as_str().unwrap();
-    // another client's refresh token for the same user survives
+    let offline = body["refresh_token"].as_str().unwrap().to_string();
+    // another client's online refresh token for the same user survives
     let (_, other) = post_form(
         &s,
         "/token",
@@ -406,10 +421,12 @@ async fn end_session_with_hint_revokes_that_clients_refresh_tokens() {
         .unwrap();
     assert_eq!(r.status(), StatusCode::FOUND);
 
-    let (st, err) = refresh(&s, rt).await;
+    let (st, err) = refresh(&s, &online).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
     assert_eq!(err["error"], "invalid_grant");
     assert_eq!(introspect(&s, other_rt).await["active"], true);
+    let (st, body) = refresh(&s, &offline).await;
+    assert_eq!(st, StatusCode::OK, "offline token survives logout: {body}");
 }
 
 #[tokio::test]

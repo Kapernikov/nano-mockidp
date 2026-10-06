@@ -40,6 +40,12 @@ async fn main() {
         strict = state.config.strict,
         "nano-mockidp starting"
     );
+    if std::env::var_os("REQUIRE_OFFLINE_ACCESS").is_some() {
+        tracing::warn!(
+            "REQUIRE_OFFLINE_ACCESS is ignored since 0.6.1: refresh tokens are online, \
+             or offline when scope has offline_access"
+        );
+    }
     spawn_sweeper(state.clone());
     let listener = match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
         Ok(l) => l,

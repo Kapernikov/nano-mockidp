@@ -28,8 +28,8 @@ fn bad_request(msg: &str) -> Response {
         .into_response()
 }
 
-/// RP-initiated logout. With an `id_token_hint` (expired is fine), the refresh tokens of
-/// that `sub` issued to that client (`azp`) are revoked.
+/// RP-initiated logout. With an `id_token_hint` (expired is fine), the online refresh tokens
+/// of that `sub` issued to that client (`azp`) are revoked. Offline ones survive, as in Keycloak.
 pub async fn handler(
     State(state): State<SharedState>,
     Query(q): Query<EndSessionQuery>,
@@ -44,7 +44,7 @@ pub async fn handler(
             .or_else(|| claims.get("aud"))
             .and_then(Value::as_str);
         if let (Some(sub), Some(client)) = (sub_of(&claims), client) {
-            let n = state.store().revoke_refresh_for(sub, Some(client));
+            let n = state.store().revoke_refresh_for(sub, Some(client), true);
             tracing::debug!(
                 sub,
                 client,

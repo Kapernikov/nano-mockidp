@@ -37,8 +37,8 @@ if [[ -z "${BASE_URL:-}" ]]; then
   PORT=${SMOKE_PORT:-18089}
   BASE_URL="http://127.0.0.1:$PORT"
   ADMIN_TOKEN=${ADMIN_TOKEN:-smoke-admin}
-  PORT=$PORT ISSUER_URL=$BASE_URL ADMIN_TOKEN=$ADMIN_TOKEN REQUIRE_OFFLINE_ACCESS=true \
-    LOG_LEVEL=warn ./target/release/nano-mockidp &
+  PORT=$PORT ISSUER_URL=$BASE_URL ADMIN_TOKEN=$ADMIN_TOKEN LOG_LEVEL=warn \
+    ./target/release/nano-mockidp &
   SERVER_PID=$!
   trap 'kill $SERVER_PID 2>/dev/null' EXIT
   for _ in $(seq 50); do
@@ -63,7 +63,8 @@ req() { # req <method> <path> [curl args...]; sets STATUS and BODY
 }
 token() { req POST /token "${client_auth[@]}" "$@"; }
 admin() { local m=$1 sub=$2; shift 2; req "$m" "/admin/subjects/$sub" -H "Authorization: Bearer $ADMIN_TOKEN" "$@"; }
-introspect_active() { req POST /introspect "${client_auth[@]}" --data-urlencode "token=$1"; jq -r .active <<<"$BODY"; }
+introspect() { req POST /introspect "${client_auth[@]}" --data-urlencode "token=$1"; jq -r "$2" <<<"$BODY"; }
+introspect_active() { introspect "$1" .active; }
 jwt_claim() { # jwt_claim <jwt> <jq filter>
   local p
   p=$(cut -d. -f2 <<<"$1" | tr '_-' '/+')
@@ -94,22 +95,18 @@ check "offline_access in scopes_supported" "$(jq -r '.scopes_supported | index("
 echo "offline_access"
 login "openid" '{"roles":["admin"]}'
 check "login without offline_access" "$STATUS" 200
-if [[ "$(jq -r 'has("refresh_token")' <<<"$BODY")" == true ]]; then
-  info "refresh_token issued without offline_access (REQUIRE_OFFLINE_ACCESS is off)"
-  # drop it so the admin checks below see exactly one refresh token
-  req POST /revoke "${client_auth[@]}" --data-urlencode "token=$(jq -r .refresh_token <<<"$BODY")"
-else
-  pass "no refresh_token without offline_access (REQUIRE_OFFLINE_ACCESS is on)"
-fi
+ONLINE_RT=$(jq -r .refresh_token <<<"$BODY")
+check "online refresh token issued" "$(introspect "$ONLINE_RT" .refresh_token_type)" online
 login "openid offline_access" '{"roles":["admin"]}'
 check "login with offline_access" "$STATUS" 200
 RT=$(jq -r .refresh_token <<<"$BODY")
-check "refresh_token issued" "$([[ $RT != null ]] && echo yes)" yes
+check "offline refresh token issued" "$(introspect "$RT" .refresh_token_type)" offline
 
 # ---------- refresh rotation ----------
 echo "refresh"
 refresh "$RT"
 check "refresh succeeds" "$STATUS" 200
+check "rotated token stays offline" "$(introspect "$(jq -r .refresh_token <<<"$BODY")" .refresh_token_type)" offline
 OLD=$RT; RT=$(jq -r .refresh_token <<<"$BODY")
 check "refresh token rotated" "$([[ $RT != "$OLD" && $RT != null ]] && echo yes)" yes
 check "roles from login" "$(jwt_claim "$(jq -r .access_token <<<"$BODY")" .roles)" '["admin"]'
@@ -125,7 +122,7 @@ else
   check "admin rejects missing bearer" "$STATUS" 401
   admin PUT "$USERNAME" -H 'content-type: application/json' -d '{"claims":{"roles":["viewer"]}}'
   check "PUT claims override" "$STATUS" 200
-  check "subject reports 1 refresh token" "$(jq -r .refresh_tokens <<<"$BODY")" 1
+  check "subject reports 1 online + 1 offline token" "$(jq -cS .refresh_tokens <<<"$BODY")" '{"offline":1,"online":1}'
   refresh "$RT"; RT=$(jq -r .refresh_token <<<"$BODY")
   check "refresh picks up new roles" "$(jwt_claim "$(jq -r .access_token <<<"$BODY")" .roles)" '["viewer"]'
   AT=$(jq -r .access_token <<<"$BODY")
@@ -145,9 +142,11 @@ else
   RT=$(jq -r .refresh_token <<<"$BODY")
 
   admin DELETE "$USERNAME"
-  check "DELETE revoked 1 refresh token" "$(jq -r .revoked_refresh_tokens <<<"$BODY")" 1
+  check "DELETE revoked online + offline token" "$(jq -r .revoked_refresh_tokens <<<"$BODY")" 2
   refresh "$RT"
-  check "deleted: refresh → invalid_grant" "$(jq -r .error <<<"$BODY")" invalid_grant
+  check "deleted: offline refresh → invalid_grant" "$(jq -r .error <<<"$BODY")" invalid_grant
+  refresh "$ONLINE_RT"
+  check "deleted: online refresh → invalid_grant" "$(jq -r .error <<<"$BODY")" invalid_grant
 fi
 
 # ---------- /revoke ----------
@@ -166,12 +165,16 @@ check "revoked access token → userinfo 401" "$STATUS" 401
 
 # ---------- end_session ----------
 echo "end_session"
+login "openid" '{}'
+ONLINE_RT=$(jq -r .refresh_token <<<"$BODY"); IDT=$(jq -r .id_token <<<"$BODY")
 login "openid offline_access" '{}'
-RT=$(jq -r .refresh_token <<<"$BODY"); IDT=$(jq -r .id_token <<<"$BODY")
+RT=$(jq -r .refresh_token <<<"$BODY")
 req GET "/end_session?id_token_hint=$IDT&post_logout_redirect_uri=$(jq -rn --arg v "$REDIRECT_URI" '$v|@uri')"
 check "end_session redirects" "$STATUS" 302
+refresh "$ONLINE_RT"
+check "after logout: online refresh → invalid_grant" "$(jq -r .error <<<"$BODY")" invalid_grant
 refresh "$RT"
-check "after logout: refresh → invalid_grant" "$(jq -r .error <<<"$BODY")" invalid_grant
+check "after logout: offline refresh still works" "$STATUS" 200
 
 echo
 if (( fail )); then echo "SMOKE TEST FAILED"; exit 1; fi

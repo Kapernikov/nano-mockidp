@@ -41,7 +41,6 @@ your app generates. You get the login page: enter a username, optionally edit th
 | `ENDPOINTS_FROM_REQUEST_HOST` | `true` | Derive backend-facing endpoint URLs in discovery from the requesting `Host` (honours `X-Forwarded-Proto` / `X-Forwarded-Host`). See below. |
 | `INTERNAL_URL` | – | If set, backend-facing endpoints use this base URL instead of the request host. |
 | `STRICT` | `false` | Strict mode: only known clients, `redirect_uri` must be registered, `client_secret` checked, PKCE required for public clients. |
-| `REQUIRE_OFFLINE_ACCESS` | `false` | Issue a `refresh_token` only when the granted `scope` contains `offline_access` (authorization code and password grants). Off: every user grant gets one, as before. |
 | `ADMIN_TOKEN` | – | Bearer secret for the `/admin/subjects` endpoints. Unset ⇒ those endpoints don't exist (404). |
 | `CLIENTS` | `[]` | JSON array of pre-registered clients: `[{"client_id":"app","client_secret":"s","redirect_uris":["http://localhost:3000/cb"]}]`. |
 | `LOGIN_PAGE_PATH` | – | Path to a custom login HTML file. Re-read on every request, so you can edit it live. |
@@ -122,9 +121,9 @@ All relative to the path of `ISSUER_URL`.
 | `POST /authorize` | Form post from the login page → `302 redirect_uri?code=…&state=…` |
 | `POST /token` | Grants: `authorization_code` (+ `code_verifier`), `refresh_token` (rotating), `client_credentials`, `password` (`username` → `sub`, password ignored; `id_token` when `scope` has `openid`). Client auth: Basic, body, or none. `resource` (RFC 8707, repeatable) or `audience` sets `aud`. |
 | `GET/POST /userinfo` | Bearer access token → claims |
-| `POST /introspect` | RFC 7662; also works for refresh tokens. Revoked tokens and disabled users → `{"active": false}` |
+| `POST /introspect` | RFC 7662; also works for refresh tokens (`refresh_token_type`: `online`/`offline`). Revoked tokens and disabled users → `{"active": false}` |
 | `POST /revoke` | RFC 7009. `token` (+ optional `token_type_hint`), client auth as on `/token`. See [Offline access and revocation](#offline-access-and-revocation) |
-| `GET /end_session` | Redirects to `post_logout_redirect_uri` (+`state`) or shows "Logged out". With `id_token_hint`, revokes that user's refresh tokens for that client |
+| `GET /end_session` | Redirects to `post_logout_redirect_uri` (+`state`) or shows "Logged out". With `id_token_hint`, revokes that user's online refresh tokens for that client |
 | `GET/PUT/DELETE /admin/subjects/{sub}`, `GET /admin/subjects` | Runtime user state; only with `ADMIN_TOKEN` |
 | `POST /register` | RFC 7591 dynamic client registration; returns `client_id`/`client_secret` |
 | `GET /health` | Also at the server root |
@@ -144,16 +143,20 @@ Access tokens and ID tokens are both RS256 JWTs with the same claims (`iss`, `su
 
 For testing background jobs that act as a user with a refresh token:
 
-- **Refresh tokens rotate**: each `grant_type=refresh_token` returns a new one and kills the old
-  one (reuse → `invalid_grant`). With `REQUIRE_OFFLINE_ACCESS=true` they're only issued when
-  `scope` contains `offline_access`.
+- **Online and offline refresh tokens** (as in Keycloak): user grants (authorization code,
+  password) always return a refresh token. It is **offline** when `scope` contains
+  `offline_access`, else **online**. The difference: logout (`end_session`) kills online tokens
+  only. Revocation, disabling and deleting a subject kill both. `/introspect` shows the type as
+  `refresh_token_type`.
+- **Refresh tokens rotate**: each `grant_type=refresh_token` returns a new one of the same type
+  and kills the old one (reuse → `invalid_grant`).
 - **`POST /revoke`** (RFC 7009): revoking a refresh token makes the next refresh fail with
   `invalid_grant`. Revoking an access/ID token remembers its `jti` until it expires, so
   `/introspect` returns `active: false` and `/userinfo` returns 401. Backends that validate the
   JWT locally against `/jwks` will still accept it until `exp`, as with any real IdP. A client
   can only revoke its own tokens; unknown tokens get 200.
-- **`GET /end_session?id_token_hint=…`** revokes the refresh tokens of that `sub` issued to that
-  client (`azp`). Expired hints are accepted; hints with a bad signature get 400.
+- **`GET /end_session?id_token_hint=…`** revokes the online refresh tokens of that `sub` issued to that
+  client (`azp`); offline ones survive. Expired hints are accepted; hints with a bad signature get 400.
 - **Changing or removing a user at runtime** (needs `ADMIN_TOKEN`):
 
   ```sh
@@ -166,12 +169,17 @@ For testing background jobs that act as a user with a refresh token:
     -d '{"disabled": true}'
   # delete: forget the state and revoke all of alice's refresh tokens
   curl -X DELETE localhost:8080/admin/subjects/alice -H "$A"
-  curl localhost:8080/admin/subjects -H "$A"     # list subjects with state
+  curl localhost:8080/admin/subjects -H "$A"     # list subjects with state and token counts
   ```
 
   `PUT` replaces the subject's whole state: `{"claims": {...} | null, "disabled": bool}`, both
   optional. `sub` in the claims is always the path value. The override only applies on refresh.
   New logins still use the claims typed into the form.
+
+`GET` returns `{"sub", "claims", "disabled", "refresh_tokens": {"online": n, "offline": m}}`.
+
+`REQUIRE_OFFLINE_ACCESS` (0.6.0) is gone: since 0.6.1 every user grant gets a refresh token, and
+`offline_access` decides its type. If set, it is ignored with a warning at startup.
 
 Everything is in memory: a restart invalidates all refresh tokens and forgets subject state.
 

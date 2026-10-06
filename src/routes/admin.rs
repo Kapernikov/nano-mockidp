@@ -45,11 +45,12 @@ pub async fn require_admin(State(state): State<SharedState>, req: Request, next:
 
 fn view(store: &Store, sub: &str) -> Value {
     let s = store.subjects.get(sub).cloned().unwrap_or_default();
+    let (online, offline) = store.count_refresh_for(sub);
     json!({
         "sub": sub,
         "claims": s.claims,
         "disabled": s.disabled,
-        "refresh_tokens": store.count_refresh_for(sub),
+        "refresh_tokens": { "online": online, "offline": offline },
     })
 }
 
@@ -88,10 +89,10 @@ pub async fn put(
     Json(view(&store, &sub))
 }
 
-/// Forget the subject's state and revoke all its refresh tokens.
+/// Forget the subject's state and revoke all its refresh tokens, online and offline.
 pub async fn delete(State(state): State<SharedState>, Path(sub): Path<String>) -> Json<Value> {
     let mut store = state.store();
     store.subjects.remove(&sub);
-    let revoked = store.revoke_refresh_for(&sub, None);
+    let revoked = store.revoke_refresh_for(&sub, None, false);
     Json(json!({ "sub": sub, "revoked_refresh_tokens": revoked }))
 }

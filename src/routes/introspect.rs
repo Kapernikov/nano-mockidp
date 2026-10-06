@@ -60,6 +60,7 @@ pub async fn handler(
         return Ok(axum::Json(json!({
             "active": true,
             "token_type": "refresh_token",
+            "refresh_token_type": e.value.kind(),
             "client_id": e.value.client_id,
             "sub": e.value.claims.get("sub"),
             "scope": e.value.scope,

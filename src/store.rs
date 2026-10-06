@@ -55,6 +55,18 @@ pub struct RefreshEntry {
     pub claims: Claims,
     pub auth_time: u64,
     pub expires_in: Option<u64>,
+    /// Granted with `offline_access`: survives logout (`end_session`), like Keycloak.
+    pub offline: bool,
+}
+
+impl RefreshEntry {
+    pub fn kind(&self) -> &'static str {
+        if self.offline {
+            "offline"
+        } else {
+            "online"
+        }
+    }
 }
 
 /// Runtime state for a `sub`, set via `/admin/subjects/{sub}`.
@@ -120,23 +132,36 @@ impl Store {
                 .is_some_and(|j| self.revoked_jti.contains_key(j))
     }
 
-    /// Drop every refresh token of `sub` (optionally only those of `client_id`).
-    /// Returns how many were removed.
-    pub fn revoke_refresh_for(&mut self, sub: &str, client_id: Option<&str>) -> usize {
+    /// Drop the refresh tokens of `sub`, optionally only those of `client_id` and/or only
+    /// online ones. Returns how many were removed.
+    pub fn revoke_refresh_for(
+        &mut self,
+        sub: &str,
+        client_id: Option<&str>,
+        online_only: bool,
+    ) -> usize {
         let before = self.refresh.len();
         self.refresh.retain(|_, e| {
             !(sub_of(&e.value.claims) == Some(sub)
-                && client_id.is_none_or(|c| c == e.value.client_id))
+                && client_id.is_none_or(|c| c == e.value.client_id)
+                && !(online_only && e.value.offline))
         });
         before - self.refresh.len()
     }
 
-    pub fn count_refresh_for(&self, sub: &str) -> usize {
+    /// Live refresh tokens of `sub` as (online, offline).
+    pub fn count_refresh_for(&self, sub: &str) -> (usize, usize) {
         let now = SystemTime::now();
         self.refresh
             .values()
             .filter(|e| !e.is_expired(now) && sub_of(&e.value.claims) == Some(sub))
-            .count()
+            .fold((0, 0), |(on, off), e| {
+                if e.value.offline {
+                    (on, off + 1)
+                } else {
+                    (on + 1, off)
+                }
+            })
     }
 
     pub fn peek_refresh(&self, token: &str) -> Option<&Expiring<RefreshEntry>> {
@@ -203,7 +228,7 @@ mod tests {
         assert!(s.take_code("code").is_none());
     }
 
-    fn refresh_for(sub: &str, client: &str) -> Expiring<RefreshEntry> {
+    fn refresh_for(sub: &str, client: &str, offline: bool) -> Expiring<RefreshEntry> {
         let mut claims = Claims::new();
         claims.insert("sub".into(), Value::from(sub));
         Expiring::new(
@@ -214,6 +239,7 @@ mod tests {
                 claims,
                 auth_time: 0,
                 expires_in: None,
+                offline,
             },
             60,
         )
@@ -222,13 +248,21 @@ mod tests {
     #[test]
     fn revoke_refresh_for_filters_by_sub_and_client() {
         let mut s = Store::default();
-        s.refresh.insert("1".into(), refresh_for("alice", "a"));
-        s.refresh.insert("2".into(), refresh_for("alice", "b"));
-        s.refresh.insert("3".into(), refresh_for("bob", "a"));
-        assert_eq!(s.count_refresh_for("alice"), 2);
-        assert_eq!(s.revoke_refresh_for("alice", Some("a")), 1);
+        s.refresh
+            .insert("1".into(), refresh_for("alice", "a", false));
+        s.refresh
+            .insert("2".into(), refresh_for("alice", "b", false));
+        s.refresh.insert("3".into(), refresh_for("bob", "a", false));
+        s.refresh
+            .insert("4".into(), refresh_for("alice", "a", true));
+        assert_eq!(s.count_refresh_for("alice"), (2, 1));
+        assert_eq!(s.revoke_refresh_for("alice", Some("a"), true), 1);
         assert!(s.refresh.contains_key("2"));
-        assert_eq!(s.revoke_refresh_for("alice", None), 1);
+        assert!(
+            s.refresh.contains_key("4"),
+            "offline survives online-only revocation"
+        );
+        assert_eq!(s.revoke_refresh_for("alice", None, false), 2);
         assert_eq!(s.refresh.len(), 1);
         assert!(s.refresh.contains_key("3"));
     }

@@ -115,13 +115,8 @@ fn new_refresh(state: &SharedState, entry: RefreshEntry) -> String {
     token
 }
 
-/// Issue a refresh token unless `REQUIRE_OFFLINE_ACCESS` is on and the scope lacks `offline_access`.
-fn maybe_refresh(state: &SharedState, entry: RefreshEntry) -> Option<String> {
-    let offline = entry
-        .scope
-        .as_deref()
-        .is_some_and(|s| s.split_whitespace().any(|x| x == "offline_access"));
-    (offline || !state.config.require_offline_access).then(|| new_refresh(state, entry))
+fn has_offline_access(scope: Option<&str>) -> bool {
+    scope.is_some_and(|s| s.split_whitespace().any(|x| x == "offline_access"))
 }
 
 fn ensure_enabled(state: &SharedState, claims: &Claims) -> Result<(), OAuthError> {
@@ -237,7 +232,7 @@ pub async fn handler(
                 expires_in: entry.expires_in,
                 with_id_token: true,
             });
-            let refresh = maybe_refresh(
+            let refresh = new_refresh(
                 &state,
                 RefreshEntry {
                     client_id,
@@ -246,9 +241,14 @@ pub async fn handler(
                     claims: entry.claims,
                     auth_time: entry.auth_time,
                     expires_in: entry.expires_in,
+                    offline: has_offline_access(entry.req.scope.as_deref()),
                 },
             );
-            Ok(token_response(set, refresh, entry.req.scope.as_deref()))
+            Ok(token_response(
+                set,
+                Some(refresh),
+                entry.req.scope.as_deref(),
+            ))
         }
         Some("refresh_token") => {
             let token = form
@@ -324,7 +324,7 @@ pub async fn handler(
                 expires_in: None,
                 with_id_token,
             });
-            let refresh = maybe_refresh(
+            let refresh = new_refresh(
                 &state,
                 RefreshEntry {
                     client_id,
@@ -333,9 +333,10 @@ pub async fn handler(
                     claims,
                     auth_time,
                     expires_in: None,
+                    offline: has_offline_access(form.scope.as_deref()),
                 },
             );
-            Ok(token_response(set, refresh, form.scope.as_deref()))
+            Ok(token_response(set, Some(refresh), form.scope.as_deref()))
         }
         Some("client_credentials") => {
             let mut claims = Claims::new();
