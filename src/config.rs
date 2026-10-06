@@ -28,6 +28,10 @@ pub struct Config {
     pub issuer_from_request_host: bool,
     pub internal_url: Option<Url>,
     pub strict: bool,
+    /// Issue refresh tokens only when the granted scope contains `offline_access`.
+    pub require_offline_access: bool,
+    /// Bearer secret for `/admin/*`; unset → admin endpoints are not mounted.
+    pub admin_token: Option<String>,
     pub clients: Vec<ClientConfig>,
     pub login_page_path: Option<PathBuf>,
     /// Claims put in every token under whatever the login form, grant or client supplies.
@@ -111,6 +115,10 @@ impl Config {
             Some(v) => parse_bool(v).map_err(|e| format!("STRICT: {e}"))?,
             None => false,
         };
+        let require_offline_access = match get("REQUIRE_OFFLINE_ACCESS") {
+            Some(v) => parse_bool(v).map_err(|e| format!("REQUIRE_OFFLINE_ACCESS: {e}"))?,
+            None => false,
+        };
         let clients: Vec<ClientConfig> = match get("CLIENTS") {
             Some(v) => {
                 serde_json::from_str(v).map_err(|e| format!("CLIENTS: invalid JSON: {e}"))?
@@ -155,6 +163,8 @@ impl Config {
             issuer_from_request_host,
             internal_url,
             strict,
+            require_offline_access,
+            admin_token: get("ADMIN_TOKEN").map(|s| s.trim().to_string()),
             clients,
             login_page_path,
             default_claims,
@@ -196,6 +206,8 @@ mod tests {
         assert!(c.endpoints_from_request_host);
         assert!(!c.issuer_from_request_host);
         assert!(!c.strict);
+        assert!(!c.require_offline_access);
+        assert!(c.admin_token.is_none());
         assert_eq!(c.access_token_ttl, 3600);
         assert_eq!(c.refresh_token_ttl, 2_592_000);
         assert_eq!(c.cors_allowed_origins, vec!["*"]);

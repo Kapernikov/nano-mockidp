@@ -35,7 +35,11 @@ pub async fn handler(
         return Err(OAuthError::invalid_request("token is required"));
     };
 
+    let store = state.store();
     if let Ok(mut claims) = verify(&state.key, state.issuer_check(), token) {
+        if store.is_blocked(&claims) {
+            return Ok(axum::Json(json!({ "active": false })));
+        }
         claims.insert("active".into(), json!(true));
         claims.insert("token_type".into(), json!("Bearer"));
         if let Some(aud) = claims.get("aud").cloned() {
@@ -44,8 +48,10 @@ pub async fn handler(
         return Ok(axum::Json(Value::Object(claims)));
     }
 
-    let store = state.store();
-    if let Some(e) = store.peek_refresh(token) {
+    if let Some(e) = store
+        .peek_refresh(token)
+        .filter(|e| !store.is_blocked(&e.value.claims))
+    {
         let exp = e
             .expires_at
             .duration_since(std::time::SystemTime::UNIX_EPOCH)

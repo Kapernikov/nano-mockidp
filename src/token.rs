@@ -136,6 +136,24 @@ pub enum IssuerCheck<'a> {
 
 /// Verify signature, `exp` and `iss` of a token issued by this server. Returns the claims.
 pub fn verify(key: &SigningKey, issuer: IssuerCheck<'_>, token: &str) -> Result<Claims, String> {
+    verify_inner(key, issuer, token, true)
+}
+
+/// Like [`verify`] but accepts expired tokens (for `id_token_hint`, revocation).
+pub fn verify_allow_expired(
+    key: &SigningKey,
+    issuer: IssuerCheck<'_>,
+    token: &str,
+) -> Result<Claims, String> {
+    verify_inner(key, issuer, token, false)
+}
+
+fn verify_inner(
+    key: &SigningKey,
+    issuer: IssuerCheck<'_>,
+    token: &str,
+    check_exp: bool,
+) -> Result<Claims, String> {
     let mut parts = token.split('.');
     let (Some(h), Some(p), Some(sig), None) =
         (parts.next(), parts.next(), parts.next(), parts.next())
@@ -173,7 +191,7 @@ pub fn verify(key: &SigningKey, issuer: IssuerCheck<'_>, token: &str) -> Result<
         .get("exp")
         .and_then(Value::as_u64)
         .ok_or("missing exp claim")?;
-    if exp <= now_secs() {
+    if check_exp && exp <= now_secs() {
         return Err("token expired".into());
     }
     let iss = claims

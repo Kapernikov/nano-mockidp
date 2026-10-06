@@ -67,6 +67,7 @@ pub struct Endpoints {
     pub jwks: String,
     pub userinfo: String,
     pub introspection: String,
+    pub revocation: String,
     pub registration: String,
 }
 
@@ -92,6 +93,7 @@ impl Endpoints {
             jwks: format!("{internal}/jwks"),
             userinfo: format!("{internal}/userinfo"),
             introspection: format!("{internal}/introspect"),
+            revocation: format!("{internal}/revoke"),
             registration: format!("{internal}/register"),
             issuer: public,
         }

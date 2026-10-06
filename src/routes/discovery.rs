@@ -17,6 +17,8 @@ pub async fn handler(
         "jwks_uri": e.jwks,
         "userinfo_endpoint": e.userinfo,
         "introspection_endpoint": e.introspection,
+        "revocation_endpoint": e.revocation,
+        "revocation_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post", "none"],
         "end_session_endpoint": e.end_session,
         "registration_endpoint": e.registration,
         "response_types_supported": ["code"],

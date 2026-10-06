@@ -9,7 +9,7 @@ use serde_json::{json, Map, Value};
 
 use crate::error::OAuthError;
 use crate::state::SharedState;
-use crate::store::{now_secs, random_token, Claims, Expiring, RefreshEntry};
+use crate::store::{now_secs, random_token, sub_of, Claims, Expiring, RefreshEntry};
 use crate::token::{audience_from_resources, pkce_verify, IssueParams, TokenSet};
 use crate::urls::RequestBase;
 
@@ -115,6 +115,24 @@ fn new_refresh(state: &SharedState, entry: RefreshEntry) -> String {
     token
 }
 
+/// Issue a refresh token unless `REQUIRE_OFFLINE_ACCESS` is on and the scope lacks `offline_access`.
+fn maybe_refresh(state: &SharedState, entry: RefreshEntry) -> Option<String> {
+    let offline = entry
+        .scope
+        .as_deref()
+        .is_some_and(|s| s.split_whitespace().any(|x| x == "offline_access"));
+    (offline || !state.config.require_offline_access).then(|| new_refresh(state, entry))
+}
+
+fn ensure_enabled(state: &SharedState, claims: &Claims) -> Result<(), OAuthError> {
+    match sub_of(claims) {
+        Some(sub) if state.store().is_disabled(sub) => Err(OAuthError::invalid_grant(format!(
+            "subject {sub} is disabled"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// Parse the form body: the typed fields plus every `resource` value (RFC 8707, may repeat).
 fn parse_body(headers: &HeaderMap, body: &[u8]) -> Result<(TokenForm, Vec<String>), OAuthError> {
     let ct = headers
@@ -203,6 +221,7 @@ pub async fn handler(
                     return Err(OAuthError::invalid_grant("PKCE verification failed"));
                 }
             }
+            ensure_enabled(&state, &entry.claims)?;
             let audience = resolve_audience(
                 &form,
                 &token_resources,
@@ -218,7 +237,7 @@ pub async fn handler(
                 expires_in: entry.expires_in,
                 with_id_token: true,
             });
-            let refresh = new_refresh(
+            let refresh = maybe_refresh(
                 &state,
                 RefreshEntry {
                     client_id,
@@ -229,11 +248,7 @@ pub async fn handler(
                     expires_in: entry.expires_in,
                 },
             );
-            Ok(token_response(
-                set,
-                Some(refresh),
-                entry.req.scope.as_deref(),
-            ))
+            Ok(token_response(set, refresh, entry.req.scope.as_deref()))
         }
         Some("refresh_token") => {
             let token = form
@@ -241,9 +256,27 @@ pub async fn handler(
                 .as_deref()
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| OAuthError::invalid_request("refresh_token is required"))?;
-            let entry = state.store().take_refresh(token).ok_or_else(|| {
-                OAuthError::invalid_grant("unknown, expired or rotated refresh token")
-            })?;
+            // Claims come from the subject's admin override if set, else the login snapshot.
+            let (entry, claims) = {
+                let mut store = state.store();
+                let sub = store
+                    .peek_refresh(token)
+                    .and_then(|e| sub_of(&e.value.claims))
+                    .map(str::to_string);
+                if let Some(sub) = sub.as_deref().filter(|s| store.is_disabled(s)) {
+                    return Err(OAuthError::invalid_grant(format!(
+                        "subject {sub} is disabled"
+                    )));
+                }
+                let entry = store.take_refresh(token).ok_or_else(|| {
+                    OAuthError::invalid_grant("unknown, expired, revoked or rotated refresh token")
+                })?;
+                let claims = sub
+                    .and_then(|s| store.subjects.get(&s))
+                    .and_then(|s| s.claims.clone())
+                    .unwrap_or_else(|| entry.claims.clone());
+                (entry, claims)
+            };
             if entry.client_id != client_id {
                 return Err(OAuthError::invalid_grant(
                     "refresh token was issued to a different client",
@@ -255,7 +288,7 @@ pub async fn handler(
                 audience: audience.clone(),
                 scope: entry.scope.clone(),
                 nonce: None,
-                claims: entry.claims.clone(),
+                claims,
                 auth_time: entry.auth_time,
                 expires_in: entry.expires_in,
                 with_id_token: true,
@@ -274,6 +307,7 @@ pub async fn handler(
                 .ok_or_else(|| OAuthError::invalid_request("username is required"))?;
             let mut claims = Claims::new();
             claims.insert("sub".into(), json!(username));
+            ensure_enabled(&state, &claims)?;
             let audience = resolve_audience(&form, &token_resources, None);
             let auth_time = now_secs();
             let with_id_token = form
@@ -290,7 +324,7 @@ pub async fn handler(
                 expires_in: None,
                 with_id_token,
             });
-            let refresh = new_refresh(
+            let refresh = maybe_refresh(
                 &state,
                 RefreshEntry {
                     client_id,
@@ -301,7 +335,7 @@ pub async fn handler(
                     expires_in: None,
                 },
             );
-            Ok(token_response(set, Some(refresh), form.scope.as_deref()))
+            Ok(token_response(set, refresh, form.scope.as_deref()))
         }
         Some("client_credentials") => {
             let mut claims = Claims::new();

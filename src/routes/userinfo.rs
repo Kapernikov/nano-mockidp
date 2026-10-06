@@ -38,6 +38,9 @@ pub async fn handler(State(state): State<SharedState>, headers: HeaderMap) -> Re
         return unauthorized("missing bearer token");
     };
     match verify(&state.key, state.issuer_check(), token) {
+        Ok(claims) if state.store().is_blocked(&claims) => {
+            unauthorized("token revoked or subject disabled")
+        }
         Ok(mut claims) => {
             for k in STRIP {
                 claims.remove(*k);

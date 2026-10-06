@@ -30,7 +30,7 @@ impl OAuthError {
         Self::new(
             StatusCode::BAD_REQUEST,
             "unsupported_grant_type",
-            "supported: authorization_code, refresh_token, client_credentials",
+            "supported: authorization_code, refresh_token, client_credentials, password",
         )
     }
     pub fn server_error(msg: impl Into<String>) -> Self {

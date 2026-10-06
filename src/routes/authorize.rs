@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 
 use crate::login::load_login_page;
 use crate::state::SharedState;
-use crate::store::{now_secs, random_token, AuthRequest, Claims, CodeEntry, Expiring};
+use crate::store::{now_secs, random_token, sub_of, AuthRequest, Claims, CodeEntry, Expiring};
 
 const PENDING_TTL: u64 = 600;
 const CODE_TTL: u64 = 300;
@@ -262,6 +262,15 @@ pub async fn post(
                 .into_response()
             }
         }
+    }
+    if let Some(sub) = sub_of(&claims).filter(|s| state.store().is_disabled(s)) {
+        return AuthzError::Redirect {
+            redirect_uri: req.redirect_uri.clone(),
+            error: "access_denied",
+            description: format!("subject {sub} is disabled"),
+            state: req.state.clone(),
+        }
+        .into_response();
     }
     let expires_in = match form
         .expires_in

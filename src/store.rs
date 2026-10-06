@@ -57,6 +57,15 @@ pub struct RefreshEntry {
     pub expires_in: Option<u64>,
 }
 
+/// Runtime state for a `sub`, set via `/admin/subjects/{sub}`.
+#[derive(Debug, Clone, Default)]
+pub struct Subject {
+    /// Replaces the login-time claims on refresh. None → use the login snapshot.
+    pub claims: Option<Claims>,
+    /// Disabled subjects cannot log in, refresh, or pass introspection/userinfo.
+    pub disabled: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct Client {
     pub client_id: String,
@@ -70,6 +79,9 @@ pub struct Store {
     pub codes: HashMap<String, Expiring<CodeEntry>>,
     pub refresh: HashMap<String, Expiring<RefreshEntry>>,
     pub clients: HashMap<String, Client>,
+    pub subjects: HashMap<String, Subject>,
+    /// `jti` of revoked access/ID tokens → their `exp` (unix seconds).
+    pub revoked_jti: HashMap<String, u64>,
 }
 
 impl Store {
@@ -77,6 +89,11 @@ impl Store {
         self.pending.retain(|_, e| !e.is_expired(now));
         self.codes.retain(|_, e| !e.is_expired(now));
         self.refresh.retain(|_, e| !e.is_expired(now));
+        let secs = now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.revoked_jti.retain(|_, exp| *exp > secs);
     }
 
     /// Remove and return an entry if present and not expired.
@@ -90,11 +107,47 @@ impl Store {
         (!e.is_expired(SystemTime::now())).then_some(e.value)
     }
 
+    pub fn is_disabled(&self, sub: &str) -> bool {
+        self.subjects.get(sub).is_some_and(|s| s.disabled)
+    }
+
+    /// True if `claims` belong to a disabled subject or carry a revoked `jti`.
+    pub fn is_blocked(&self, claims: &Claims) -> bool {
+        sub_of(claims).is_some_and(|s| self.is_disabled(s))
+            || claims
+                .get("jti")
+                .and_then(Value::as_str)
+                .is_some_and(|j| self.revoked_jti.contains_key(j))
+    }
+
+    /// Drop every refresh token of `sub` (optionally only those of `client_id`).
+    /// Returns how many were removed.
+    pub fn revoke_refresh_for(&mut self, sub: &str, client_id: Option<&str>) -> usize {
+        let before = self.refresh.len();
+        self.refresh.retain(|_, e| {
+            !(sub_of(&e.value.claims) == Some(sub)
+                && client_id.is_none_or(|c| c == e.value.client_id))
+        });
+        before - self.refresh.len()
+    }
+
+    pub fn count_refresh_for(&self, sub: &str) -> usize {
+        let now = SystemTime::now();
+        self.refresh
+            .values()
+            .filter(|e| !e.is_expired(now) && sub_of(&e.value.claims) == Some(sub))
+            .count()
+    }
+
     pub fn peek_refresh(&self, token: &str) -> Option<&Expiring<RefreshEntry>> {
         self.refresh
             .get(token)
             .filter(|e| !e.is_expired(SystemTime::now()))
     }
+}
+
+pub fn sub_of(claims: &Claims) -> Option<&str> {
+    claims.get("sub").and_then(Value::as_str)
 }
 
 pub fn random_token() -> String {
@@ -148,6 +201,56 @@ mod tests {
         s.codes.insert("code".into(), Expiring::new(entry, 60));
         assert!(s.take_code("code").is_some());
         assert!(s.take_code("code").is_none());
+    }
+
+    fn refresh_for(sub: &str, client: &str) -> Expiring<RefreshEntry> {
+        let mut claims = Claims::new();
+        claims.insert("sub".into(), Value::from(sub));
+        Expiring::new(
+            RefreshEntry {
+                client_id: client.into(),
+                scope: None,
+                audience: None,
+                claims,
+                auth_time: 0,
+                expires_in: None,
+            },
+            60,
+        )
+    }
+
+    #[test]
+    fn revoke_refresh_for_filters_by_sub_and_client() {
+        let mut s = Store::default();
+        s.refresh.insert("1".into(), refresh_for("alice", "a"));
+        s.refresh.insert("2".into(), refresh_for("alice", "b"));
+        s.refresh.insert("3".into(), refresh_for("bob", "a"));
+        assert_eq!(s.count_refresh_for("alice"), 2);
+        assert_eq!(s.revoke_refresh_for("alice", Some("a")), 1);
+        assert!(s.refresh.contains_key("2"));
+        assert_eq!(s.revoke_refresh_for("alice", None), 1);
+        assert_eq!(s.refresh.len(), 1);
+        assert!(s.refresh.contains_key("3"));
+    }
+
+    #[test]
+    fn is_blocked_by_disabled_sub_or_revoked_jti() {
+        let mut s = Store::default();
+        let mut c = Claims::new();
+        c.insert("sub".into(), Value::from("alice"));
+        c.insert("jti".into(), Value::from("j1"));
+        assert!(!s.is_blocked(&c));
+        s.revoked_jti.insert("j1".into(), u64::MAX);
+        assert!(s.is_blocked(&c));
+        s.revoked_jti.clear();
+        s.subjects.insert(
+            "alice".into(),
+            Subject {
+                claims: None,
+                disabled: true,
+            },
+        );
+        assert!(s.is_blocked(&c));
     }
 
     #[test]
