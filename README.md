@@ -236,6 +236,7 @@ curl -s -X POST http://localhost:8080/token -d grant_type=authorization_code -d 
 ```sh
 cargo test
 cargo run     # http://localhost:8080
+scripts/smoke.sh   # curl+jq smoke test; starts a release build, or set BASE_URL (+ADMIN_TOKEN) to test a running instance
 docker build -t nano-mockidp .
 ```
 
