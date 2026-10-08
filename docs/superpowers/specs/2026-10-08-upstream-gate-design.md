@@ -171,8 +171,9 @@ With the gate on, every way to a user token must pass it:
   (own signing key or an upstream JWK).
 - `src/routes/authorize.rs`, `src/routes/token.rs`: gate checks behind a small
   `state.gate()` accessor that is `None` when the gate is off or the feature is absent.
-- `src/store.rs`: `upstream_pending`, `upstream_sub` on code/refresh entries,
-  `Client.dynamic: bool`.
+- `src/store.rs`: `upstream_pending`, `upstream_sub` on code/refresh entries.
+  "Configured client" means an entry of `Config.clients` (the `CLIENTS` env var), so clients
+  from `/register` are excluded without extra bookkeeping.
 
 ## Testing
 
