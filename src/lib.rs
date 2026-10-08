@@ -6,6 +6,8 @@ pub mod routes;
 pub mod state;
 pub mod store;
 pub mod token;
+#[cfg(feature = "upstream")]
+pub mod upstream;
 pub mod urls;
 
 pub use config::Config;
