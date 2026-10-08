@@ -73,16 +73,6 @@ impl RefreshEntry {
     }
 }
 
-/// A browser on its way through the upstream login, keyed by the upstream `state`.
-#[derive(Debug, Clone)]
-pub struct UpstreamLogin {
-    pub nonce: String,
-    /// PKCE verifier for the upstream code exchange.
-    pub verifier: String,
-    /// Path + query of the original `/authorize` request, to return to.
-    pub return_to: String,
-}
-
 /// Runtime state for a `sub`, set via `/admin/subjects/{sub}`.
 #[derive(Debug, Clone, Default)]
 pub struct Subject {
@@ -104,7 +94,6 @@ pub struct Store {
     pub pending: HashMap<String, Expiring<AuthRequest>>,
     pub codes: HashMap<String, Expiring<CodeEntry>>,
     pub refresh: HashMap<String, Expiring<RefreshEntry>>,
-    pub upstream_pending: HashMap<String, Expiring<UpstreamLogin>>,
     pub clients: HashMap<String, Client>,
     pub subjects: HashMap<String, Subject>,
     /// `jti` of revoked access/ID tokens → their `exp` (unix seconds).
@@ -116,7 +105,6 @@ impl Store {
         self.pending.retain(|_, e| !e.is_expired(now));
         self.codes.retain(|_, e| !e.is_expired(now));
         self.refresh.retain(|_, e| !e.is_expired(now));
-        self.upstream_pending.retain(|_, e| !e.is_expired(now));
         let secs = now
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -127,11 +115,6 @@ impl Store {
     /// Remove and return an entry if present and not expired.
     pub fn take_code(&mut self, code: &str) -> Option<CodeEntry> {
         let e = self.codes.remove(code)?;
-        (!e.is_expired(SystemTime::now())).then_some(e.value)
-    }
-
-    pub fn take_upstream_login(&mut self, state: &str) -> Option<UpstreamLogin> {
-        let e = self.upstream_pending.remove(state)?;
         (!e.is_expired(SystemTime::now())).then_some(e.value)
     }
 

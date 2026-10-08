@@ -185,27 +185,38 @@ if [[ "${UPSTREAM_SMOKE:-}" == 1 ]]; then
   cargo build --release --quiet
   UP_PORT=$(( ${SMOKE_PORT:-18089} + 1 )); GATED_PORT=$(( ${SMOKE_PORT:-18089} + 2 ))
   UP="http://127.0.0.1:$UP_PORT"; GATED="http://127.0.0.1:$GATED_PORT"
-  PORT=$UP_PORT ISSUER_URL=$UP LOG_LEVEL=warn ./target/release/nano-mockidp &
+  # clean env for everything that changes the gate's behaviour, then set what we need
+  clean_env=(env -u STRICT -u SIGNING_KEY_SEED -u SIGNING_KEY_PEM -u SIGNING_KEY_PATH -u ADMIN_TOKEN
+    -u CLIENTS -u DEFAULT_CLAIMS -u LOGIN_PAGE_PATH -u ISSUER_FROM_REQUEST_HOST -u INTERNAL_URL)
+  for v in $(env | grep -o '^UPSTREAM_[A-Z_]*' || true); do clean_env+=(-u "$v"); done
+  JAR=$(mktemp)
+  trap 'kill ${SERVER_PID:-} ${UP_PID:-} ${GATED_PID:-} 2>/dev/null || true; rm -f "$JAR"' EXIT
+  "${clean_env[@]}" PORT=$UP_PORT ISSUER_URL=$UP LOG_LEVEL=warn ./target/release/nano-mockidp &
   UP_PID=$!
-  PORT=$GATED_PORT ISSUER_URL=$GATED LOG_LEVEL=warn UPSTREAM_ISSUER=$UP UPSTREAM_CLIENT_ID=gate \
-    UPSTREAM_REQUIRE_CLAIM=groups=testers UPSTREAM_SUB_TOKEN_CLAIM=upstream_sub \
+  # no signing key settings: a random key, so no seed warning
+  "${clean_env[@]}" PORT=$GATED_PORT ISSUER_URL=$GATED LOG_LEVEL=warn UPSTREAM_ISSUER=$UP \
+    UPSTREAM_CLIENT_ID=gate UPSTREAM_REQUIRE_CLAIM=groups=testers UPSTREAM_SUB_TOKEN_CLAIM=upstream_sub \
     ./target/release/nano-mockidp &
   GATED_PID=$!
-  trap 'kill ${SERVER_PID:-} $UP_PID $GATED_PID 2>/dev/null' EXIT
   for u in "$UP" "$GATED"; do
-    for _ in $(seq 50); do curl -sf "$u/health" >/dev/null && break; sleep 0.1; done
+    up=0
+    for _ in $(seq 50); do curl -sf "$u/health" >/dev/null && { up=1; break; }; sleep 0.1; done
+    if (( !up )); then bad "upstream/gated instance did not start ($u)"; exit 1; fi
   done
-  JAR=$(mktemp)
   uri() { jq -rn --arg v "$1" '$v|@uri'; }
   AUTHZ="$GATED/authorize?response_type=code&client_id=smoke&state=s&scope=$(uri 'openid offline_access')&redirect_uri=$(uri "$REDIRECT_URI")"
 
-  to_up=$(curl -s -o /dev/null -w '%{redirect_url}' "$AUTHZ")
+  # the jar carries the pre-login cookie from the first GET to the callback
+  to_up=$(curl -s -o /dev/null -w '%{redirect_url}' -c "$JAR" "$AUTHZ")
   check "no gate cookie → upstream login" "${to_up%%\?*}" "$UP/authorize"
+  check "pre-login cookie set" "$(grep -c nano_mockidp_login_ "$JAR")" 1
   to_cb=$(curl -s -o /dev/null -w '%{redirect_url}' -X POST "$to_up" \
     --data-urlencode username=realfrank --data-urlencode 'claims={"groups":["testers"]}')
   check "upstream returns to the callback" "${to_cb%%\?*}" "$GATED/upstream/callback"
-  check "callback → 302" "$(curl -s -o /dev/null -w '%{http_code}' -c "$JAR" "$to_cb")" 302
+  check "callback in another browser → 400" "$(curl -s -o /dev/null -w '%{http_code}' "$to_cb")" 400
+  check "callback → 302" "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -c "$JAR" "$to_cb")" 302
   check "gate cookie set" "$(grep -c nano_mockidp_gate "$JAR")" 1
+  check "pre-login cookie cleared" "$(grep -c nano_mockidp_login_ "$JAR")" 0
   check "login page behind the gate" "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" "$AUTHZ")" 200
 
   loc=$(curl -s -o /dev/null -w '%{redirect_url}' -b "$JAR" -X POST "$AUTHZ" \
@@ -221,10 +232,12 @@ if [[ "${UPSTREAM_SMOKE:-}" == 1 ]]; then
 
   check "POST without cookie → 403" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$AUTHZ" \
     --data-urlencode username=alice)" 403
-  to_up=$(curl -s -o /dev/null -w '%{redirect_url}' "$AUTHZ")
+  : >"$JAR"
+  to_up=$(curl -s -o /dev/null -w '%{redirect_url}' -c "$JAR" "$AUTHZ")
   to_cb=$(curl -s -o /dev/null -w '%{redirect_url}' -X POST "$to_up" \
     --data-urlencode username=intruder --data-urlencode 'claims={"groups":["devs"]}')
-  check "upstream user without the group → 403" "$(curl -s -o /dev/null -w '%{http_code}' "$to_cb")" 403
+  check "upstream user without the group → 403" "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" "$to_cb")" 403
+  check "overlong authorize request → 414" "$(curl -s -o /dev/null -w '%{http_code}' "$AUTHZ&pad=$(printf 'x%.0s' $(seq 3000))")" 414
   check "password grant behind the gate → unauthorized_client" "$(curl -s -X POST "$GATED/token" \
     -d grant_type=password -d client_id=smoke -d username=alice -d password=x | jq -r .error)" unauthorized_client
   rm -f "$JAR"

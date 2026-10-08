@@ -193,7 +193,7 @@ pub async fn get(
         if gate.session(&headers).is_none() {
             let query = raw.as_deref().map(|q| format!("?{q}")).unwrap_or_default();
             let return_to = format!("{}/authorize{query}", state.config.issuer_path);
-            return gate.start_login(&state, return_to).await;
+            return gate.start_login(return_to).await;
         }
     }
     state

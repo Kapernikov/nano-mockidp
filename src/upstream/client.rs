@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -18,6 +18,8 @@ use crate::token::{jws_header, verify_signature};
 
 /// Clock skew tolerated on the upstream ID token's `exp`.
 const LEEWAY: u64 = 60;
+/// How long a failed discovery is answered from cache instead of refetched.
+const DISCOVERY_RETRY: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Deserialize)]
 struct Metadata {
@@ -31,6 +33,8 @@ pub struct Upstream {
     http: reqwest::Client,
     /// Discovery, cached after the first success.
     meta: Mutex<Option<Arc<Metadata>>>,
+    /// Last discovery failure: when, and the error, returned as is for [`DISCOVERY_RETRY`].
+    meta_err: Mutex<Option<(Instant, String)>>,
     /// JWKS RSA keys by `kid` ("" when the JWK has none).
     keys: Mutex<HashMap<String, VerifyingKey<Sha256>>>,
 }
@@ -63,6 +67,7 @@ impl Upstream {
             cfg,
             http,
             meta: Mutex::new(None),
+            meta_err: Mutex::new(None),
             keys: Mutex::new(HashMap::new()),
         })
     }
@@ -80,16 +85,31 @@ impl Upstream {
         r.json().await.map_err(|e| format!("GET {url}: {e}"))
     }
 
-    /// Discovery, fetched on first use; a failure is retried on the next call.
+    /// Discovery, fetched on first use; a failure is remembered for [`DISCOVERY_RETRY`] so a
+    /// down upstream is not refetched for every visitor.
     async fn metadata(&self) -> Result<Arc<Metadata>, String> {
         let cached = self.meta.lock().unwrap_or_else(|p| p.into_inner()).clone();
         if let Some(m) = cached {
             return Ok(m);
         }
+        if let Some((at, e)) = &*self.meta_err.lock().unwrap_or_else(|p| p.into_inner()) {
+            if at.elapsed() < DISCOVERY_RETRY {
+                return Err(e.clone());
+            }
+        }
         let url = format!("{}/.well-known/openid-configuration", self.cfg.issuer);
-        let m: Arc<Metadata> = Arc::new(self.get_json(&url).await?);
-        *self.meta.lock().unwrap_or_else(|p| p.into_inner()) = Some(m.clone());
-        Ok(m)
+        match self.get_json::<Metadata>(&url).await {
+            Ok(m) => {
+                let m = Arc::new(m);
+                *self.meta.lock().unwrap_or_else(|p| p.into_inner()) = Some(m.clone());
+                Ok(m)
+            }
+            Err(e) => {
+                *self.meta_err.lock().unwrap_or_else(|p| p.into_inner()) =
+                    Some((Instant::now(), e.clone()));
+                Err(e)
+            }
+        }
     }
 
     /// Where to send the browser to log in upstream.
@@ -181,7 +201,7 @@ impl Upstream {
             .get("exp")
             .and_then(Value::as_u64)
             .ok_or("id_token has no exp")?;
-        if exp + LEEWAY <= now_secs() {
+        if exp.saturating_add(LEEWAY) <= now_secs() {
             return Err("id_token expired".into());
         }
         if claims.get("nonce").and_then(Value::as_str) != Some(nonce) {
@@ -283,6 +303,42 @@ mod tests {
             {"kty": "RSA", "kid": "enc", "use": "enc", "n": "AQAB", "e": "AQAB"}
         ]});
         assert!(parse_jwks(&jwks).is_empty());
+    }
+
+    fn cfg(issuer: &str) -> UpstreamConfig {
+        UpstreamConfig {
+            issuer: issuer.into(),
+            client_id: "c".into(),
+            client_secret: None,
+            scope: "openid".into(),
+            require_claim: None,
+            session_ttl: 60,
+            sub_token_claim: None,
+            ca_path: None,
+        }
+    }
+
+    /// A failed discovery is remembered: a second visitor does not refetch right away.
+    #[tokio::test]
+    async fn discovery_failure_is_cached() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        tokio::spawn(async move {
+            // accept and hang up: every discovery attempt fails
+            while let Ok((conn, _)) = listener.accept().await {
+                h.fetch_add(1, Ordering::SeqCst);
+                drop(conn);
+            }
+        });
+        let up = Upstream::new(cfg(&format!("http://{addr}"))).unwrap();
+        let e1 = up.authorize_url("r", "s", "n", "c").await.unwrap_err();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        let e2 = up.authorize_url("r", "s", "n", "c").await.unwrap_err();
+        assert_eq!(e1, e2, "the cached error");
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "no second fetch");
     }
 
     #[test]

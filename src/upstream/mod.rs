@@ -4,7 +4,7 @@ pub mod client;
 pub mod gate;
 
 use axum::extract::{Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -13,15 +13,17 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub use client::Upstream;
-pub use gate::{GateKey, GateSession};
+pub use gate::{GateKey, GateSession, PendingLogin};
 
 use crate::config::Config;
 use crate::routes::authorize::{error_page, found};
-use crate::state::{AppState, SharedState};
-use crate::store::{now_secs, random_token, Claims, Expiring, UpstreamLogin};
+use crate::state::SharedState;
+use crate::store::{now_secs, random_token, Claims};
 
-/// How long a browser may take for the upstream login.
+/// How long a browser may take for the upstream login (pre-login cookie lifetime).
 const LOGIN_TTL: u64 = 600;
+/// Longest `/authorize` path + query carried through the upstream login in the cookie.
+const MAX_RETURN_TO: usize = 2048;
 
 pub struct Gate {
     pub upstream: Upstream,
@@ -53,11 +55,20 @@ impl Gate {
 
     /// The gate session of a request, if it carries a valid, unexpired cookie.
     pub fn session(&self, headers: &HeaderMap) -> Option<GateSession> {
-        self.key.open(gate::cookie_value(headers)?, now_secs())
+        self.key
+            .open(gate::cookie_value(headers, gate::COOKIE_NAME)?, now_secs())
+    }
+
+    fn set_cookie(&self, name: &str, value: &str, max_age: u64) -> String {
+        gate::set_cookie(name, value, &self.cookie_path, max_age, self.secure)
     }
 
     /// Send the browser to the upstream login; it comes back to `return_to` (path + query).
-    pub async fn start_login(&self, state: &AppState, return_to: String) -> Response {
+    /// The login lives in a sealed pre-login cookie: nothing is stored server side.
+    pub async fn start_login(&self, return_to: String) -> Response {
+        if return_to.len() > MAX_RETURN_TO {
+            return page(StatusCode::URI_TOO_LONG, "authorization request too long");
+        }
         let verifier = random_token();
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
         let login_state = random_token();
@@ -68,18 +79,18 @@ impl Gate {
             .await
         {
             Ok(url) => {
-                state.store().upstream_pending.insert(
-                    login_state,
-                    Expiring::new(
-                        UpstreamLogin {
-                            nonce,
-                            verifier,
-                            return_to,
-                        },
-                        LOGIN_TTL,
-                    ),
-                );
-                found(&url)
+                let name =
+                    gate::login_cookie_name(&login_state).expect("random_token is base64url");
+                let sealed = self.key.seal(&PendingLogin {
+                    state: login_state,
+                    nonce,
+                    verifier,
+                    return_to,
+                    exp: now_secs() + LOGIN_TTL,
+                });
+                let mut r = found(&url);
+                add_set_cookie(&mut r, &self.set_cookie(&name, &sealed, LOGIN_TTL));
+                r
             }
             Err(e) => {
                 tracing::error!("upstream gate: {e}");
@@ -96,6 +107,11 @@ fn page(status: StatusCode, msg: &str) -> Response {
     (status, Html(error_page(msg))).into_response()
 }
 
+fn add_set_cookie(r: &mut Response, cookie: &str) {
+    let v = HeaderValue::from_str(cookie).expect("cookie names and values are base64url");
+    r.headers_mut().append(header::SET_COOKIE, v);
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CallbackQuery {
     pub code: Option<String>,
@@ -104,7 +120,7 @@ pub struct CallbackQuery {
     pub error_description: Option<String>,
 }
 
-async fn redeem(gate: &Gate, code: &str, login: &UpstreamLogin) -> Result<Claims, String> {
+async fn redeem(gate: &Gate, code: &str, login: &PendingLogin) -> Result<Claims, String> {
     let id_token = gate
         .upstream
         .exchange(code, &gate.redirect_uri, &login.verifier)
@@ -112,24 +128,48 @@ async fn redeem(gate: &Gate, code: &str, login: &UpstreamLogin) -> Result<Claims
     gate.upstream.verify_id_token(&id_token, &login.nonce).await
 }
 
+fn unknown_state() -> Response {
+    page(
+        StatusCode::BAD_REQUEST,
+        "unknown or expired login state: start again from the application \
+         (the login must finish in the same browser, on the ISSUER_URL host)",
+    )
+}
+
 /// `GET /upstream/callback`: finish the upstream login, check access, set the gate cookie.
+/// Only the browser holding the pre-login cookie for `state` can finish; the cookie is
+/// cleared on every outcome.
 pub async fn callback(
     State(state): State<SharedState>,
     Query(q): Query<CallbackQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let Some(gate) = &state.gate else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let login = q
-        .state
-        .as_deref()
-        .and_then(|s| state.store().take_upstream_login(s));
-    let Some(login) = login else {
-        return page(
-            StatusCode::BAD_REQUEST,
-            "unknown or expired login state: start again from the application",
-        );
+    let Some(st) = q.state.as_deref() else {
+        return unknown_state();
     };
+    let Some(name) = gate::login_cookie_name(st) else {
+        return unknown_state();
+    };
+    let Some(value) = gate::cookie_value(&headers, &name) else {
+        return unknown_state();
+    };
+    let login = gate
+        .key
+        .open::<PendingLogin>(value, now_secs())
+        .filter(|l| l.state == st);
+    let mut r = match login {
+        Some(login) => finish(gate, &q, login).await,
+        None => unknown_state(),
+    };
+    add_set_cookie(&mut r, &gate.set_cookie(&name, "", 0));
+    r
+}
+
+/// The callback once the pre-login cookie checked out.
+async fn finish(gate: &Gate, q: &CallbackQuery, login: PendingLogin) -> Response {
     if let Some(err) = &q.error {
         return page(
             StatusCode::FORBIDDEN,
@@ -188,15 +228,7 @@ pub async fn callback(
         email,
         exp: now_secs() + ttl,
     });
-    (
-        StatusCode::FOUND,
-        [
-            (header::LOCATION, login.return_to),
-            (
-                header::SET_COOKIE,
-                gate::set_cookie(&cookie, &gate.cookie_path, ttl, gate.secure),
-            ),
-        ],
-    )
-        .into_response()
+    let mut r = found(&login.return_to);
+    add_set_cookie(&mut r, &gate.set_cookie(gate::COOKIE_NAME, &cookie, ttl));
+    r
 }
