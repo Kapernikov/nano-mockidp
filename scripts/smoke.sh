@@ -12,9 +12,11 @@
 #   CLIENT_ID      default smoke (in STRICT mode it must be registered with REDIRECT_URI)
 #   CLIENT_SECRET  sent if set
 #   REDIRECT_URI   default http://localhost/cb
+#   UPSTREAM_SMOKE=1  also test the upstream gate with two local binaries (ports SMOKE_PORT+1, +2)
 #
 # Needs curl and jq. Uses a fresh random username, so it's safe against a shared instance.
 set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
 
 CLIENT_ID=${CLIENT_ID:-smoke}
 CLIENT_SECRET=${CLIENT_SECRET:-}
@@ -31,7 +33,7 @@ check() { # check <description> <actual> <expected>
 
 # ---------- start a local instance if needed ----------
 if [[ -z "${BASE_URL:-}" ]]; then
-  cd "$(dirname "$0")/.."
+  cd "$ROOT"
   echo "building release binary..."
   cargo build --release --quiet
   PORT=${SMOKE_PORT:-18089}
@@ -175,6 +177,58 @@ refresh "$ONLINE_RT"
 check "after logout: online refresh → invalid_grant" "$(jq -r .error <<<"$BODY")" invalid_grant
 refresh "$RT"
 check "after logout: offline refresh still works" "$STATUS" 200
+
+# ---------- upstream gate (UPSTREAM_SMOKE=1; two local binaries) ----------
+if [[ "${UPSTREAM_SMOKE:-}" == 1 ]]; then
+  echo "upstream gate"
+  cd "$ROOT"
+  cargo build --release --quiet
+  UP_PORT=$(( ${SMOKE_PORT:-18089} + 1 )); GATED_PORT=$(( ${SMOKE_PORT:-18089} + 2 ))
+  UP="http://127.0.0.1:$UP_PORT"; GATED="http://127.0.0.1:$GATED_PORT"
+  PORT=$UP_PORT ISSUER_URL=$UP LOG_LEVEL=warn ./target/release/nano-mockidp &
+  UP_PID=$!
+  PORT=$GATED_PORT ISSUER_URL=$GATED LOG_LEVEL=warn UPSTREAM_ISSUER=$UP UPSTREAM_CLIENT_ID=gate \
+    UPSTREAM_REQUIRE_CLAIM=groups=testers UPSTREAM_SUB_TOKEN_CLAIM=upstream_sub \
+    ./target/release/nano-mockidp &
+  GATED_PID=$!
+  trap 'kill ${SERVER_PID:-} $UP_PID $GATED_PID 2>/dev/null' EXIT
+  for u in "$UP" "$GATED"; do
+    for _ in $(seq 50); do curl -sf "$u/health" >/dev/null && break; sleep 0.1; done
+  done
+  JAR=$(mktemp)
+  uri() { jq -rn --arg v "$1" '$v|@uri'; }
+  AUTHZ="$GATED/authorize?response_type=code&client_id=smoke&state=s&scope=$(uri 'openid offline_access')&redirect_uri=$(uri "$REDIRECT_URI")"
+
+  to_up=$(curl -s -o /dev/null -w '%{redirect_url}' "$AUTHZ")
+  check "no gate cookie → upstream login" "${to_up%%\?*}" "$UP/authorize"
+  to_cb=$(curl -s -o /dev/null -w '%{redirect_url}' -X POST "$to_up" \
+    --data-urlencode username=realfrank --data-urlencode 'claims={"groups":["testers"]}')
+  check "upstream returns to the callback" "${to_cb%%\?*}" "$GATED/upstream/callback"
+  check "callback → 302" "$(curl -s -o /dev/null -w '%{http_code}' -c "$JAR" "$to_cb")" 302
+  check "gate cookie set" "$(grep -c nano_mockidp_gate "$JAR")" 1
+  check "login page behind the gate" "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" "$AUTHZ")" 200
+
+  loc=$(curl -s -o /dev/null -w '%{redirect_url}' -b "$JAR" -X POST "$AUTHZ" \
+    --data-urlencode username=alice --data-urlencode 'claims={"upstream_sub":"forged"}')
+  code=$(sed -n 's/.*[?&]code=\([^&]*\).*/\1/p' <<<"$loc")
+  BODY=$(curl -s -X POST "$GATED/token" -d grant_type=authorization_code -d client_id=smoke \
+    -d "code=$code" --data-urlencode "redirect_uri=$REDIRECT_URI")
+  AT=$(jq -r .access_token <<<"$BODY"); RT=$(jq -r .refresh_token <<<"$BODY")
+  check "persona sub" "$(jwt_claim "$AT" .sub)" '"alice"'
+  check "upstream_sub from the gate, not the form" "$(jwt_claim "$AT" .upstream_sub)" '"realfrank"'
+  check "gated refresh works" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GATED/token" \
+    -d grant_type=refresh_token -d client_id=smoke --data-urlencode "refresh_token=$RT")" 200
+
+  check "POST without cookie → 403" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$AUTHZ" \
+    --data-urlencode username=alice)" 403
+  to_up=$(curl -s -o /dev/null -w '%{redirect_url}' "$AUTHZ")
+  to_cb=$(curl -s -o /dev/null -w '%{redirect_url}' -X POST "$to_up" \
+    --data-urlencode username=intruder --data-urlencode 'claims={"groups":["devs"]}')
+  check "upstream user without the group → 403" "$(curl -s -o /dev/null -w '%{http_code}' "$to_cb")" 403
+  check "password grant behind the gate → unauthorized_client" "$(curl -s -X POST "$GATED/token" \
+    -d grant_type=password -d client_id=smoke -d username=alice -d password=x | jq -r .error)" unauthorized_client
+  rm -f "$JAR"
+fi
 
 echo
 if (( fail )); then echo "SMOKE TEST FAILED"; exit 1; fi

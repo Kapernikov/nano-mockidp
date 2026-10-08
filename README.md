@@ -15,8 +15,9 @@ startup, everything configured through environment variables.
 - Solves the *"browser sees `localhost`, backend sees `mockidp`"* problem inside the IdP
 - Permissive by default; `STRICT=true` for real client/redirect/secret validation
 - Optional deterministic signing key (`SIGNING_KEY_SEED`) so JWKS survives restarts
+- Optional **upstream IdP gate** (`UPSTREAM_ISSUER`): testers log in at a real OIDC provider before picking a persona — for test environments on the open internet
 
-Not a real identity provider. Tokens are forgeable by design. Never expose it publicly.
+Not a real identity provider. Tokens are forgeable by design. Never expose it publicly — unless behind the [upstream gate](#gating-with-an-upstream-idp).
 
 ## Quick start
 
@@ -183,6 +184,55 @@ For testing background jobs that act as a user with a refresh token:
 
 Everything is in memory: a restart invalidates all refresh tokens and forgets subject state.
 
+## Gating with an upstream IdP
+
+For a test environment on the internet: before the persona form, testers log in at a real
+OpenID Connect provider (Entra ID, Google, Keycloak, …) and must pass a claim check. After that,
+everything works as without the gate: any username, any claims. The upstream identity never
+becomes the token's `sub`.
+
+```sh
+docker run --rm -p 8080:8080 \
+  -e ISSUER_URL=https://mockidp.test.example \
+  -e SIGNING_KEY_PEM="$(cat key.pem)" \
+  -e UPSTREAM_ISSUER=https://login.microsoftonline.com/<tenant>/v2.0 \
+  -e UPSTREAM_CLIENT_ID=<app id> -e UPSTREAM_CLIENT_SECRET=<secret> \
+  -e UPSTREAM_REQUIRE_CLAIM=groups=<tester group id> \
+  ghcr.io/kapernikov/nano-mockidp:latest
+```
+
+Register `<ISSUER_URL>/upstream/callback` as the redirect URI at the upstream.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `UPSTREAM_ISSUER` | – | Upstream issuer URL. Setting it turns the gate on. |
+| `UPSTREAM_CLIENT_ID` | – | Required with the gate. |
+| `UPSTREAM_CLIENT_SECRET` | – | Sent with HTTP Basic. Unset → public client with PKCE. |
+| `UPSTREAM_SCOPE` | `openid email profile` | `openid` is added if missing. |
+| `UPSTREAM_REQUIRE_CLAIM` | – | `path=value`: the upstream ID-token claim at `path` (dots descend, e.g. `realm_access.roles=tester`) must equal `value` or, if an array, contain it. Unset → any upstream user. |
+| `UPSTREAM_SESSION_TTL` | `28800` | Seconds before a tester goes through the upstream again. |
+| `UPSTREAM_SUB_TOKEN_CLAIM` | – | Claim name that carries the tester's upstream `sub` in every token (e.g. `upstream_sub`). Can't be overridden from the form. |
+| `UPSTREAM_CA_PATH` | – | Extra PEM CA bundle for the upstream (private CA). |
+
+With the gate on:
+
+| | |
+|---|---|
+| `GET /authorize` | needs the gate cookie, else redirect to the upstream |
+| `POST /authorize` | needs the gate cookie, else 403 |
+| `password`, `client_credentials` grants | only for a `CLIENTS` entry with a `client_secret`, secret checked (clients from `/register` don't count) |
+| everything else | unchanged: refresh (online/offline), revoke, logout, introspect, userinfo, admin |
+
+**Use a secret signing key** (`SIGNING_KEY_PEM` / `SIGNING_KEY_PATH`): with a guessable
+`SIGNING_KEY_SEED` anyone can sign their own tokens and skip the gate. Startup warns about this.
+
+The gate cookie's key is random per start: after a restart testers pass the upstream again.
+Without a bypass for robots, run e2e suites against an ungated instance.
+
+The gate is a Cargo feature (`upstream`, on by default, ~TLS client via rustls + ring, no
+OpenSSL). `cargo build --release --no-default-features` builds the smaller binary without it;
+that binary refuses to start when `UPSTREAM_ISSUER` is set.
+
 ## Strict mode
 
 ```sh
@@ -245,6 +295,7 @@ curl -s -X POST http://localhost:8080/token -d grant_type=authorization_code -d 
 cargo test
 cargo run     # http://localhost:8080
 scripts/smoke.sh   # curl+jq smoke test; starts a release build, or set BASE_URL (+ADMIN_TOKEN) to test a running instance
+UPSTREAM_SMOKE=1 scripts/smoke.sh   # also the upstream gate, with two local binaries
 docker build -t nano-mockidp .
 ```
 

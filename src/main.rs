@@ -40,6 +40,21 @@ async fn main() {
         strict = state.config.strict,
         "nano-mockidp starting"
     );
+    if let Some(up) = &state.config.upstream {
+        tracing::info!(
+            upstream = %up.issuer,
+            client_id = %up.client_id,
+            require_claim = ?up.require_claim,
+            "upstream gate on"
+        );
+        if state.key.source == nano_mockidp::keys::KeySource::Seed {
+            tracing::warn!(
+                "upstream gate is on but the signing key comes from SIGNING_KEY_SEED: anyone \
+                 who guesses the seed can mint tokens without passing the gate; use \
+                 SIGNING_KEY_PEM or SIGNING_KEY_PATH on public instances"
+            );
+        }
+    }
     if std::env::var_os("REQUIRE_OFFLINE_ACCESS").is_some() {
         tracing::warn!(
             "REQUIRE_OFFLINE_ACCESS is ignored since 0.6.1: refresh tokens are online, \
