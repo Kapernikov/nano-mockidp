@@ -226,10 +226,18 @@ With the gate on:
 **Use a secret signing key** (`SIGNING_KEY_PEM` / `SIGNING_KEY_PATH`): with a guessable
 `SIGNING_KEY_SEED` anyone can sign their own tokens and skip the gate. Startup warns about this.
 
+While a tester is at the upstream, the login in progress lives in a short-lived signed
+cookie (`nano_mockidp_login_…`, 10 minutes), so only the browser that started it can finish
+it and the server keeps no state for visitors who never log in.
+
 The gate cookie's key is random per start: after a restart testers pass the upstream again.
+Testers should reach the IdP at the `ISSUER_URL` host: the upstream returns there and the
+cookies are set there. With `ISSUER_FROM_REQUEST_HOST=true`, a login started on another host
+cannot finish (its pre-login cookie belongs to that host) and ends on a "start again" page.
+On a public instance use a long random `ADMIN_TOKEN` (or leave it unset).
 Without a bypass for robots, run e2e suites against an ungated instance.
 
-The gate is a Cargo feature (`upstream`, on by default, ~TLS client via rustls + ring, no
+The gate is a Cargo feature (`upstream`, on by default, TLS client via rustls + ring, no
 OpenSSL). `cargo build --release --no-default-features` builds the smaller binary without it;
 that binary refuses to start when `UPSTREAM_ISSUER` is set.
 

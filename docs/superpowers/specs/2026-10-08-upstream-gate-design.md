@@ -87,7 +87,11 @@ guessable seed lets anyone derive the key and mint tokens without passing the ga
 3. Gate on, no/invalid/expired cookie →
    - create an upstream login: `state`, `nonce`, PKCE verifier (all random), and the
      original request as *path + query* (relative, so the final redirect can't leave this host);
-   - store it in `Store.upstream_pending` under `state`, TTL 600 s (swept like `pending`);
+   - path + query longer than 2048 bytes → 414 error page, no upstream redirect;
+   - seal it (same HMAC key as the gate cookie, different MAC label, so neither cookie opens
+     as the other) into a pre-login cookie `nano_mockidp_login_<first 12 chars of state>`,
+     `Max-Age=600`, same attributes as the gate cookie. Nothing is stored server side, and the
+     login is bound to the browser that started it; per-`state` names let parallel logins run;
    - 302 to the upstream `authorization_endpoint` with `response_type=code`, `client_id`,
      `redirect_uri`, `scope`, `state`, `nonce`, `code_challenge`, `code_challenge_method=S256`.
 
@@ -97,7 +101,10 @@ registered URI.
 
 ### `GET /upstream/callback` (route exists only when the gate is on)
 
-1. Take the pending login by `state` (single use). Unknown/expired → 400 error page.
+1. Open the pre-login cookie named for `state`; its sealed `state` must equal the query's.
+   Missing/invalid/expired/mismatched (e.g. callback opened in another browser) → 400 error
+   page. Whenever the cookie was present, the response clears it (`Max-Age=0`); a replay
+   that keeps the cookie fails at the upstream, whose code is single-use.
 2. `error` from upstream → 403 error page showing `error` / `error_description`.
 3. POST the upstream `token_endpoint`: `grant_type=authorization_code`, `code`,
    `redirect_uri`, `code_verifier`, client auth via Basic if a secret is configured, else
@@ -166,12 +173,14 @@ With the gate on, every way to a user token must pass it:
 
 - `src/upstream/mod.rs` (feature-gated): config struct, discovery + JWKS cache, the
   `/upstream/callback` handler, the upstream redirect, ID-token verification.
-- `src/upstream/gate.rs`: cookie encode/verify, claim check (pure functions, unit tested).
+- `src/upstream/gate.rs`: cookie seal/open for both payloads (`GateSession`,
+  `PendingLogin`), claim check (pure functions, unit tested).
 - `src/token.rs`: split the JWS check so it verifies against any RSA public key
   (own signing key or an upstream JWK).
 - `src/routes/authorize.rs`, `src/routes/token.rs`: gate checks behind a small
   `state.gate()` accessor that is `None` when the gate is off or the feature is absent.
-- `src/store.rs`: `upstream_pending`, `upstream_sub` on code/refresh entries.
+- `src/store.rs`: `upstream_sub` on code/refresh entries (no pending-login store: the
+  pre-login cookie carries it).
   "Configured client" means an entry of `Config.clients` (the `CLIENTS` env var), so clients
   from `/register` are excluded without extra bookkeeping.
 
@@ -186,7 +195,9 @@ upstream, B = gated with `UPSTREAM_ISSUER=A`, `UPSTREAM_REQUIRE_CLAIM=groups=tes
   refresh and an admin claims override.
 - Denied: upstream user without the group → 403, no cookie.
 - `POST /authorize` without cookie → 403; with a tampered or expired cookie → 403.
-- Callback with unknown/reused `state` → 400; wrong `nonce` / wrong `iss` → rejected.
+- Callback with unknown/reused `state`, or without the pre-login cookie (another browser)
+  → 400; a login cookie never passes as a gate cookie or vice versa; wrong `nonce` / wrong
+  `iss` → rejected.
 - Password and client_credentials: refused for unknown and dynamically registered clients,
   allowed for a configured client with the right secret.
 - Gate off: the existing `tests/flow.rs` and `tests/offline.rs` stay unchanged and green.
