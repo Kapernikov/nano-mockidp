@@ -1,5 +1,5 @@
 use axum::extract::{Form, Query, RawQuery, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -66,7 +66,7 @@ impl IntoResponse for AuthzError {
     }
 }
 
-fn error_page(msg: &str) -> String {
+pub fn error_page(msg: &str) -> String {
     let escaped = msg
         .replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -177,15 +177,25 @@ fn validate(
     })
 }
 
+#[cfg_attr(not(feature = "upstream"), allow(unused_variables))]
 pub async fn get(
     State(state): State<SharedState>,
     Query(q): Query<AuthorizeQuery>,
     RawQuery(raw): RawQuery,
+    headers: HeaderMap,
 ) -> Response {
     let req = match validate(&state, &q, resources_from_query(raw.as_deref())) {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
+    #[cfg(feature = "upstream")]
+    if let Some(gate) = &state.gate {
+        if gate.session(&headers).is_none() {
+            let query = raw.as_deref().map(|q| format!("?{q}")).unwrap_or_default();
+            let return_to = format!("{}/authorize{query}", state.config.issuer_path);
+            return gate.start_login(&state, return_to).await;
+        }
+    }
     state
         .store()
         .pending
@@ -208,12 +218,30 @@ pub async fn get(
     }
 }
 
+#[cfg_attr(not(feature = "upstream"), allow(unused_variables))]
 pub async fn post(
     State(state): State<SharedState>,
     Query(q): Query<AuthorizeQuery>,
     RawQuery(raw): RawQuery,
+    headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
+    // Behind the upstream gate, only browsers that passed it may log in as a persona.
+    #[allow(unused_mut)]
+    let mut upstream_sub: Option<String> = None;
+    #[cfg(feature = "upstream")]
+    if let Some(gate) = &state.gate {
+        match gate.session(&headers) {
+            Some(s) => upstream_sub = Some(s.sub),
+            None => {
+                return AuthzError::Page(
+                    StatusCode::FORBIDDEN,
+                    "not signed in at the upstream identity provider: reload the login page".into(),
+                )
+                .into_response()
+            }
+        }
+    }
     let req = match validate(&state, &q, resources_from_query(raw.as_deref())) {
         Ok(r) => r,
         Err(e) => return e.into_response(),
@@ -300,11 +328,20 @@ pub async fn post(
             qp.append_pair("state", s);
         }
     }
+    if let Some(up) = &upstream_sub {
+        tracing::info!(
+            upstream_sub = %up,
+            sub = ?sub_of(&claims),
+            client_id = %req.client_id,
+            "persona login behind the upstream gate"
+        );
+    }
     let entry = CodeEntry {
         req,
         claims,
         auth_time: now_secs(),
         expires_in,
+        upstream_sub,
     };
     state
         .store()

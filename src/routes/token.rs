@@ -106,6 +106,23 @@ fn token_response(set: TokenSet, refresh: Option<String>, scope: Option<&str>) -
         .into_response()
 }
 
+/// `UPSTREAM_SUB_TOKEN_CLAIM`: the gate's upstream `sub`, set over whatever was typed at login.
+fn with_upstream_claim(
+    state: &SharedState,
+    mut claims: Claims,
+    upstream_sub: Option<&str>,
+) -> Claims {
+    let name = state
+        .config
+        .upstream
+        .as_ref()
+        .and_then(|u| u.sub_token_claim.as_deref());
+    if let (Some(name), Some(sub)) = (name, upstream_sub) {
+        claims.insert(name.into(), json!(sub));
+    }
+    claims
+}
+
 fn new_refresh(state: &SharedState, entry: RefreshEntry) -> String {
     let token = random_token();
     state.store().refresh.insert(
@@ -227,7 +244,11 @@ pub async fn handler(
                 audience: audience.clone(),
                 scope: entry.req.scope.clone(),
                 nonce: entry.req.nonce.clone(),
-                claims: entry.claims.clone(),
+                claims: with_upstream_claim(
+                    &state,
+                    entry.claims.clone(),
+                    entry.upstream_sub.as_deref(),
+                ),
                 auth_time: entry.auth_time,
                 expires_in: entry.expires_in,
                 with_id_token: true,
@@ -242,6 +263,7 @@ pub async fn handler(
                     auth_time: entry.auth_time,
                     expires_in: entry.expires_in,
                     offline: has_offline_access(entry.req.scope.as_deref()),
+                    upstream_sub: entry.upstream_sub.clone(),
                 },
             );
             Ok(token_response(
@@ -288,7 +310,7 @@ pub async fn handler(
                 audience: audience.clone(),
                 scope: entry.scope.clone(),
                 nonce: None,
-                claims,
+                claims: with_upstream_claim(&state, claims, entry.upstream_sub.as_deref()),
                 auth_time: entry.auth_time,
                 expires_in: entry.expires_in,
                 with_id_token: true,
@@ -334,6 +356,7 @@ pub async fn handler(
                     auth_time,
                     expires_in: None,
                     offline: has_offline_access(form.scope.as_deref()),
+                    upstream_sub: None,
                 },
             );
             Ok(token_response(set, Some(refresh), form.scope.as_deref()))

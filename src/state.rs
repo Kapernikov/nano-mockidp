@@ -10,6 +10,9 @@ pub struct AppState {
     pub config: Config,
     pub key: SigningKey,
     pub store: Mutex<Store>,
+    /// Upstream IdP gate; None when `UPSTREAM_ISSUER` is unset.
+    #[cfg(feature = "upstream")]
+    pub gate: Option<crate::upstream::Gate>,
     issuer_str: String,
 }
 
@@ -36,11 +39,15 @@ impl AppState {
                 },
             );
         }
+        #[cfg(feature = "upstream")]
+        let gate = crate::upstream::Gate::new(&config)?;
         let issuer_str = config.issuer();
         Ok(AppState {
             config,
             key,
             store: Mutex::new(store),
+            #[cfg(feature = "upstream")]
+            gate,
             issuer_str,
         })
     }

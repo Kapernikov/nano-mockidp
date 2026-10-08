@@ -16,6 +16,11 @@ pub struct TestServer {
 /// Start the server in-process on an ephemeral port. `env` overrides config values.
 /// Unless `ISSUER_URL` is given, it is set to `http://127.0.0.1:<port>`.
 pub async fn spawn(env: &[(&str, &str)]) -> TestServer {
+    spawn_at("", env).await
+}
+
+/// Like [`spawn`], with the default `ISSUER_URL` mounted at `path` (e.g. "/mockidp").
+pub async fn spawn_at(path: &str, env: &[(&str, &str)]) -> TestServer {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let root = format!("http://127.0.0.1:{port}");
@@ -24,7 +29,7 @@ pub async fn spawn(env: &[(&str, &str)]) -> TestServer {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
     map.entry("ISSUER_URL".into())
-        .or_insert_with(|| root.clone());
+        .or_insert_with(|| format!("{root}{path}"));
     let config = Config::from_map(&map).unwrap();
     let issuer = config.issuer();
     let base = format!("{root}{}", config.issuer_path);

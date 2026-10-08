@@ -1,5 +1,5 @@
 mod admin;
-mod authorize;
+pub mod authorize;
 mod discovery;
 mod health;
 mod introspect;
@@ -32,6 +32,13 @@ pub fn router(state: SharedState) -> Router {
         .route("/health", get(health::handler));
     let oidc = if state.config.admin_token.is_some() {
         oidc.merge(admin_routes(state.clone()))
+    } else {
+        oidc
+    };
+
+    #[cfg(feature = "upstream")]
+    let oidc = if state.gate.is_some() {
+        oidc.route("/upstream/callback", get(crate::upstream::callback))
     } else {
         oidc
     };
