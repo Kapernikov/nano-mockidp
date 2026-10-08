@@ -1,5 +1,6 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use rsa::pkcs1v15::VerifyingKey as RsaVerifyingKey;
 use rsa::signature::{SignatureEncoding, Signer, Verifier};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -148,25 +149,27 @@ pub fn verify_allow_expired(
     verify_inner(key, issuer, token, false)
 }
 
-fn verify_inner(
-    key: &SigningKey,
-    issuer: IssuerCheck<'_>,
-    token: &str,
-    check_exp: bool,
-) -> Result<Claims, String> {
+/// The decoded JOSE header of a compact JWS.
+pub fn jws_header(token: &str) -> Result<Value, String> {
+    let h = token.split('.').next().unwrap_or_default();
+    serde_json::from_slice(
+        &URL_SAFE_NO_PAD
+            .decode(h)
+            .map_err(|e| format!("bad header encoding: {e}"))?,
+    )
+    .map_err(|e| format!("bad header json: {e}"))
+}
+
+/// Check that `token` is an RS256 compact JWS signed by `verifier`; returns its claims.
+/// `exp`, `iss` and `aud` are the caller's business.
+pub fn verify_signature(verifier: &RsaVerifyingKey<Sha256>, token: &str) -> Result<Claims, String> {
     let mut parts = token.split('.');
     let (Some(h), Some(p), Some(sig), None) =
         (parts.next(), parts.next(), parts.next(), parts.next())
     else {
         return Err("token is not a compact JWS (expected 3 segments)".into());
     };
-    let header: Value = serde_json::from_slice(
-        &URL_SAFE_NO_PAD
-            .decode(h)
-            .map_err(|e| format!("bad header encoding: {e}"))?,
-    )
-    .map_err(|e| format!("bad header json: {e}"))?;
-    if header.get("alg").and_then(Value::as_str) != Some("RS256") {
+    if jws_header(token)?.get("alg").and_then(Value::as_str) != Some("RS256") {
         return Err("unsupported alg (expected RS256)".into());
     }
     let sig_bytes = URL_SAFE_NO_PAD
@@ -174,19 +177,28 @@ fn verify_inner(
         .map_err(|e| format!("bad signature encoding: {e}"))?;
     let signature = rsa::pkcs1v15::Signature::try_from(sig_bytes.as_slice())
         .map_err(|e| format!("bad signature: {e}"))?;
-    key.verifier
+    verifier
         .verify(&token.as_bytes()[..h.len() + 1 + p.len()], &signature)
         .map_err(|_| "invalid signature".to_string())?;
-    let claims: Claims = match serde_json::from_slice::<Value>(
+    match serde_json::from_slice::<Value>(
         &URL_SAFE_NO_PAD
             .decode(p)
             .map_err(|e| format!("bad payload encoding: {e}"))?,
     )
     .map_err(|e| format!("bad payload json: {e}"))?
     {
-        Value::Object(m) => m,
-        _ => return Err("claims are not an object".into()),
-    };
+        Value::Object(m) => Ok(m),
+        _ => Err("claims are not an object".into()),
+    }
+}
+
+fn verify_inner(
+    key: &SigningKey,
+    issuer: IssuerCheck<'_>,
+    token: &str,
+    check_exp: bool,
+) -> Result<Claims, String> {
+    let claims = verify_signature(&key.verifier, token)?;
     let exp = claims
         .get("exp")
         .and_then(Value::as_u64)
