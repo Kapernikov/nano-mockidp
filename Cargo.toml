@@ -6,6 +6,11 @@ license = "MIT"
 description = "Lightweight mock OpenID Connect provider for dev and CI"
 repository = "https://github.com/Kapernikov/nano-mockidp"
 
+[features]
+default = ["upstream"]
+# Upstream IdP gate: pulls in an HTTPS client (rustls + ring, bundled roots; no OpenSSL).
+upstream = ["dep:reqwest", "dep:hmac"]
+
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "form", "query"] }
 tokio = { version = "1", features = ["rt", "net", "macros", "time"] }
@@ -20,6 +25,8 @@ base64 = "0.22"
 url = "2"
 serde_urlencoded = "0.7"
 tracing = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json"], optional = true }
+hmac = { version = "0.12", optional = true }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 
 [dev-dependencies]

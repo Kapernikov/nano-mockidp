@@ -16,6 +16,93 @@ pub struct ClientConfig {
     pub redirect_uris: Option<Vec<String>>,
 }
 
+/// The upstream IdP gate (`UPSTREAM_*`). Present iff `UPSTREAM_ISSUER` is set.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpstreamConfig {
+    /// Issuer URL without trailing slash; ID-token `iss` is compared ignoring a trailing slash.
+    pub issuer: String,
+    pub client_id: String,
+    pub client_secret: Option<String>,
+    /// Always contains `openid`.
+    pub scope: String,
+    /// `UPSTREAM_REQUIRE_CLAIM` as (dotted path, value).
+    pub require_claim: Option<(String, String)>,
+    /// Seconds a gate cookie is valid.
+    pub session_ttl: u64,
+    /// Claim that carries the upstream `sub` in issued tokens.
+    pub sub_token_claim: Option<String>,
+    /// Extra PEM CA bundle for upstream TLS.
+    pub ca_path: Option<PathBuf>,
+}
+
+/// Claims `UPSTREAM_SUB_TOKEN_CLAIM` may not name: they identify the persona or the token.
+const RESERVED_CLAIMS: &[&str] = &[
+    "sub",
+    "iss",
+    "aud",
+    "azp",
+    "exp",
+    "iat",
+    "jti",
+    "nonce",
+    "auth_time",
+];
+
+fn parse_upstream<'a>(
+    get: impl Fn(&str) -> Option<&'a str>,
+) -> Result<Option<UpstreamConfig>, String> {
+    let Some(issuer) = get("UPSTREAM_ISSUER") else {
+        return Ok(None);
+    };
+    let issuer = issuer.trim().trim_end_matches('/').to_string();
+    parse_url("UPSTREAM_ISSUER", &issuer)?;
+    let client_id = get("UPSTREAM_CLIENT_ID")
+        .map(|s| s.trim().to_string())
+        .ok_or("UPSTREAM_CLIENT_ID is required when UPSTREAM_ISSUER is set")?;
+    let mut scope = get("UPSTREAM_SCOPE")
+        .unwrap_or("openid email profile")
+        .trim()
+        .to_string();
+    if !scope.split_whitespace().any(|s| s == "openid") {
+        scope = format!("openid {scope}");
+    }
+    let require_claim = match get("UPSTREAM_REQUIRE_CLAIM") {
+        None => None,
+        Some(v) => match v.trim().split_once('=') {
+            Some((path, value)) if !path.trim().is_empty() && !value.trim().is_empty() => {
+                Some((path.trim().to_string(), value.trim().to_string()))
+            }
+            _ => {
+                return Err(format!(
+                    "UPSTREAM_REQUIRE_CLAIM: expected path=value, got {v:?}"
+                ))
+            }
+        },
+    };
+    let session_ttl = match get("UPSTREAM_SESSION_TTL") {
+        Some(v) => parse_u64("UPSTREAM_SESSION_TTL", v)?,
+        None => 28_800,
+    };
+    let sub_token_claim = match get("UPSTREAM_SUB_TOKEN_CLAIM").map(str::trim) {
+        Some(c) if RESERVED_CLAIMS.contains(&c) => {
+            return Err(format!(
+                "UPSTREAM_SUB_TOKEN_CLAIM: {c:?} is reserved, pick another name"
+            ))
+        }
+        c => c.map(str::to_string),
+    };
+    Ok(Some(UpstreamConfig {
+        issuer,
+        client_id,
+        client_secret: get("UPSTREAM_CLIENT_SECRET").map(|s| s.trim().to_string()),
+        scope,
+        require_claim,
+        session_ttl,
+        sub_token_claim,
+        ca_path: get("UPSTREAM_CA_PATH").map(PathBuf::from),
+    }))
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub port: u16,
@@ -34,6 +121,8 @@ pub struct Config {
     pub login_page_path: Option<PathBuf>,
     /// Claims put in every token under whatever the login form, grant or client supplies.
     pub default_claims: Claims,
+    /// Upstream IdP gate; None → off.
+    pub upstream: Option<UpstreamConfig>,
     pub access_token_ttl: u64,
     pub id_token_ttl: u64,
     pub refresh_token_ttl: u64,
@@ -149,6 +238,7 @@ impl Config {
                 .collect(),
             None => vec!["*".to_string()],
         };
+        let upstream = parse_upstream(get)?;
         Ok(Config {
             port,
             issuer_url,
@@ -161,6 +251,7 @@ impl Config {
             clients,
             login_page_path,
             default_claims,
+            upstream,
             access_token_ttl,
             id_token_ttl,
             refresh_token_ttl,
@@ -254,5 +345,80 @@ mod tests {
                 .endpoints_from_request_host
         );
         assert!(cfg(&[("STRICT", "maybe")]).is_err());
+    }
+
+    #[test]
+    fn upstream_off_by_default() {
+        assert!(cfg(&[]).unwrap().upstream.is_none());
+    }
+
+    #[test]
+    fn upstream_config() {
+        let u = cfg(&[
+            ("UPSTREAM_ISSUER", "https://idp.example/realms/t/"),
+            ("UPSTREAM_CLIENT_ID", "gate"),
+            ("UPSTREAM_SCOPE", "email groups"),
+            ("UPSTREAM_REQUIRE_CLAIM", "realm_access.roles=tester"),
+            ("UPSTREAM_SUB_TOKEN_CLAIM", "upstream_sub"),
+            ("UPSTREAM_SESSION_TTL", "60"),
+        ])
+        .unwrap()
+        .upstream
+        .unwrap();
+        assert_eq!(u.issuer, "https://idp.example/realms/t");
+        assert_eq!(u.client_id, "gate");
+        assert!(u.client_secret.is_none());
+        assert_eq!(u.scope, "openid email groups");
+        assert_eq!(
+            u.require_claim,
+            Some(("realm_access.roles".to_string(), "tester".to_string()))
+        );
+        assert_eq!(u.session_ttl, 60);
+        assert_eq!(u.sub_token_claim.as_deref(), Some("upstream_sub"));
+
+        let u = cfg(&[
+            ("UPSTREAM_ISSUER", "https://idp.example"),
+            ("UPSTREAM_CLIENT_ID", "gate"),
+            ("UPSTREAM_CLIENT_SECRET", "s"),
+        ])
+        .unwrap()
+        .upstream
+        .unwrap();
+        assert_eq!(u.scope, "openid email profile");
+        assert_eq!(u.session_ttl, 28_800);
+        assert_eq!(u.client_secret.as_deref(), Some("s"));
+        assert!(u.require_claim.is_none());
+        assert!(u.sub_token_claim.is_none());
+    }
+
+    #[test]
+    fn upstream_config_errors() {
+        let base = [
+            ("UPSTREAM_ISSUER", "https://idp.example"),
+            ("UPSTREAM_CLIENT_ID", "gate"),
+        ];
+        let with = |k: &'static str, v: &'static str| {
+            let mut e = base.to_vec();
+            e.push((k, v));
+            cfg(&e)
+        };
+        assert!(cfg(&[("UPSTREAM_ISSUER", "https://idp.example")])
+            .unwrap_err()
+            .contains("UPSTREAM_CLIENT_ID"));
+        assert!(cfg(&[
+            ("UPSTREAM_ISSUER", "not a url"),
+            ("UPSTREAM_CLIENT_ID", "g")
+        ])
+        .is_err());
+        for bad in ["groups", "=testers", "groups="] {
+            assert!(with("UPSTREAM_REQUIRE_CLAIM", bad).is_err(), "{bad}");
+        }
+        for reserved in ["sub", "iss", "aud", "exp"] {
+            assert!(
+                with("UPSTREAM_SUB_TOKEN_CLAIM", reserved).is_err(),
+                "{reserved}"
+            );
+        }
+        assert!(with("UPSTREAM_SESSION_TTL", "abc").is_err());
     }
 }

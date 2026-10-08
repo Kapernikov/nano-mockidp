@@ -17,6 +17,13 @@ pub type SharedState = Arc<AppState>;
 
 impl AppState {
     pub fn new(config: Config) -> Result<AppState, String> {
+        #[cfg(not(feature = "upstream"))]
+        if config.upstream.is_some() {
+            return Err(
+                "UPSTREAM_ISSUER is set but this binary was built without the `upstream` feature"
+                    .into(),
+            );
+        }
         let key = SigningKey::load(&config)?;
         let mut store = Store::default();
         for c in &config.clients {
@@ -68,5 +75,23 @@ impl AppState {
             id_ttl: self.config.id_token_ttl,
             default_claims: &self.config.default_claims,
         }
+    }
+}
+
+#[cfg(all(test, not(feature = "upstream")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upstream_needs_the_feature() {
+        let m = [
+            ("UPSTREAM_ISSUER", "https://idp.example"),
+            ("UPSTREAM_CLIENT_ID", "gate"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let err = AppState::new(Config::from_map(&m).unwrap()).err().unwrap();
+        assert!(err.contains("without the `upstream` feature"), "{err}");
     }
 }
