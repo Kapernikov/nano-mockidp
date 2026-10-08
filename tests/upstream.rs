@@ -332,3 +332,85 @@ async fn no_callback_route_without_gate() {
         .unwrap();
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
 }
+
+/// Gated, upstream never contacted (token grants don't need it).
+async fn gated_offline() -> TestServer {
+    spawn(&[
+        ("UPSTREAM_ISSUER", "http://127.0.0.1:9"),
+        ("UPSTREAM_CLIENT_ID", "gate"),
+        (
+            "CLIENTS",
+            r#"[{"client_id":"ci","client_secret":"s3cret"},{"client_id":"public"}]"#,
+        ),
+    ])
+    .await
+}
+
+async fn grant(
+    s: &TestServer,
+    grant: &str,
+    client_id: &str,
+    secret: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut form = vec![
+        ("grant_type", grant),
+        ("client_id", client_id),
+        ("username", "alice"),
+        ("password", "x"),
+    ];
+    if let Some(sec) = secret {
+        form.push(("client_secret", sec));
+    }
+    let r = s
+        .client
+        .post(s.url("/token"))
+        .form(&form)
+        .send()
+        .await
+        .unwrap();
+    (r.status(), r.json().await.unwrap())
+}
+
+#[tokio::test]
+async fn browserless_grants_need_a_configured_client_with_secret() {
+    let s = gated_offline().await;
+    let reg: Value = s
+        .client
+        .post(s.url("/register"))
+        .json(&json!({"redirect_uris": ["http://x/cb"]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let (dyn_id, dyn_secret) = (
+        reg["client_id"].as_str().unwrap().to_string(),
+        reg["client_secret"].as_str().unwrap().to_string(),
+    );
+    for g in ["password", "client_credentials"] {
+        for (id, secret) in [
+            ("app", None),
+            ("public", None),
+            ("ci", None),
+            ("ci", Some("wrong")),
+            (dyn_id.as_str(), Some(dyn_secret.as_str())),
+        ] {
+            let (status, body) = grant(&s, g, id, secret).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{g} {id} {secret:?}");
+            assert_eq!(body["error"], "unauthorized_client", "{g} {id}");
+        }
+        let (status, _) = grant(&s, g, "ci", Some("s3cret")).await;
+        assert_eq!(status, StatusCode::OK, "{g} with the configured secret");
+    }
+    // HTTP Basic works too
+    let r = s
+        .client
+        .post(s.url("/token"))
+        .basic_auth("ci", Some("s3cret"))
+        .form(&[("grant_type", "client_credentials")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+}

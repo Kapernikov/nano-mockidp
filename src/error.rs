@@ -26,6 +26,9 @@ impl OAuthError {
     pub fn invalid_grant(msg: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, "invalid_grant", msg)
     }
+    pub fn unauthorized_client(msg: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, "unauthorized_client", msg)
+    }
     pub fn unsupported_grant_type() -> Self {
         Self::new(
             StatusCode::BAD_REQUEST,

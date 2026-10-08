@@ -182,6 +182,34 @@ fn resolve_audience(
         .or(fallback)
 }
 
+/// With the upstream gate on, the browser-less user grants (password, client_credentials)
+/// are only for clients configured in `CLIENTS` with a secret, and the secret must match.
+/// Dynamically registered clients don't count: anyone can register one.
+fn ensure_trusted_client(
+    state: &SharedState,
+    headers: &HeaderMap,
+    form: &TokenForm,
+) -> Result<(), OAuthError> {
+    if state.config.upstream.is_none() {
+        return Ok(());
+    }
+    let (id, secret) = client_credentials(
+        headers,
+        form.client_id.as_deref(),
+        form.client_secret.as_deref(),
+    );
+    let trusted = state.config.clients.iter().any(|c| {
+        Some(&c.client_id) == id.as_ref() && c.client_secret.is_some() && c.client_secret == secret
+    });
+    if trusted {
+        return Ok(());
+    }
+    tracing::warn!(client_id = ?id, grant = ?form.grant_type, "grant refused by the upstream gate");
+    Err(OAuthError::unauthorized_client(
+        "behind the upstream gate this grant needs a client from CLIENTS with its client_secret",
+    ))
+}
+
 pub async fn handler(
     State(state): State<SharedState>,
     RequestBase(base): RequestBase,
@@ -320,6 +348,7 @@ pub async fn handler(
             Ok(token_response(set, Some(refresh), scope.as_deref()))
         }
         Some("password") => {
+            ensure_trusted_client(&state, &headers, &form)?;
             // Resource owner password grant: any password, `username` becomes `sub`.
             // Lets scripts and tests mint user tokens without driving the login form.
             let username = form
@@ -362,6 +391,7 @@ pub async fn handler(
             Ok(token_response(set, Some(refresh), form.scope.as_deref()))
         }
         Some("client_credentials") => {
+            ensure_trusted_client(&state, &headers, &form)?;
             let mut claims = Claims::new();
             claims.insert("sub".into(), json!(client_id));
             let set = state.token_issuer(&issuer).issue(IssueParams {
