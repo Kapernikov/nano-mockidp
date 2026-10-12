@@ -340,6 +340,7 @@ pub async fn post(
         req,
         claims,
         auth_time: now_secs(),
+        sid: random_token(),
         expires_in,
         upstream_sub,
     };

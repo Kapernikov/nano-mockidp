@@ -43,6 +43,8 @@ pub struct CodeEntry {
     pub req: AuthRequest,
     pub claims: Claims,
     pub auth_time: u64,
+    /// Login session id, minted when the login form is submitted.
+    pub sid: String,
     pub expires_in: Option<u64>,
     /// Upstream `sub` of the tester who passed the gate.
     pub upstream_sub: Option<String>,
@@ -56,6 +58,8 @@ pub struct RefreshEntry {
     pub audience: Option<Value>,
     pub claims: Claims,
     pub auth_time: u64,
+    /// Login session id (`sid`); kept across rotation. `end_session` ends one sid.
+    pub sid: String,
     pub expires_in: Option<u64>,
     /// Granted with `offline_access`: survives logout (`end_session`), like Keycloak.
     pub offline: bool,
@@ -153,6 +157,15 @@ impl Store {
         before - self.refresh.len()
     }
 
+    /// Drop the online refresh tokens of one login session (`sid`) of `client_id`.
+    pub fn revoke_session(&mut self, sid: &str, client_id: &str) -> usize {
+        let before = self.refresh.len();
+        self.refresh.retain(|_, e| {
+            !(e.value.sid == sid && e.value.client_id == client_id && !e.value.offline)
+        });
+        before - self.refresh.len()
+    }
+
     /// Live refresh tokens of `sub` as (online, offline).
     pub fn count_refresh_for(&self, sub: &str) -> (usize, usize) {
         let now = SystemTime::now();
@@ -225,6 +238,7 @@ mod tests {
             req: req(),
             claims: Claims::new(),
             auth_time: 0,
+            sid: "s".into(),
             expires_in: None,
             upstream_sub: None,
         };
@@ -234,6 +248,10 @@ mod tests {
     }
 
     fn refresh_for(sub: &str, client: &str, offline: bool) -> Expiring<RefreshEntry> {
+        refresh_in(sub, client, offline, "s")
+    }
+
+    fn refresh_in(sub: &str, client: &str, offline: bool, sid: &str) -> Expiring<RefreshEntry> {
         let mut claims = Claims::new();
         claims.insert("sub".into(), Value::from(sub));
         Expiring::new(
@@ -243,6 +261,7 @@ mod tests {
                 audience: None,
                 claims,
                 auth_time: 0,
+                sid: sid.into(),
                 expires_in: None,
                 offline,
                 upstream_sub: None,
@@ -271,6 +290,22 @@ mod tests {
         assert_eq!(s.revoke_refresh_for("alice", None, false), 2);
         assert_eq!(s.refresh.len(), 1);
         assert!(s.refresh.contains_key("3"));
+    }
+
+    #[test]
+    fn revoke_session_filters_by_sid_and_client() {
+        let mut s = Store::default();
+        s.refresh
+            .insert("1".into(), refresh_in("alice", "a", false, "s1"));
+        s.refresh
+            .insert("2".into(), refresh_in("alice", "a", false, "s2"));
+        s.refresh
+            .insert("3".into(), refresh_in("alice", "b", false, "s1"));
+        s.refresh
+            .insert("4".into(), refresh_in("alice", "a", true, "s1"));
+        assert_eq!(s.revoke_session("s1", "a"), 1);
+        assert!(!s.refresh.contains_key("1"));
+        assert_eq!(s.refresh.len(), 3);
     }
 
     #[test]

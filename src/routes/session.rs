@@ -29,7 +29,9 @@ fn bad_request(msg: &str) -> Response {
 }
 
 /// RP-initiated logout. With an `id_token_hint` (expired is fine), the online refresh tokens
-/// of that `sub` issued to that client (`azp`) are revoked. Offline ones survive, as in Keycloak.
+/// of that login session (`sid`) issued to that client (`azp`) are revoked. Other logins of the
+/// same `sub` and offline tokens survive, as in Keycloak. A hint without `sid` (minted before
+/// sids existed) revokes nothing: the store is in memory, so its refresh tokens are gone anyway.
 pub async fn handler(
     State(state): State<SharedState>,
     Query(q): Query<EndSessionQuery>,
@@ -43,14 +45,22 @@ pub async fn handler(
             .get("azp")
             .or_else(|| claims.get("aud"))
             .and_then(Value::as_str);
-        if let (Some(sub), Some(client)) = (sub_of(&claims), client) {
-            let n = state.store().revoke_refresh_for(sub, Some(client), true);
-            tracing::debug!(
-                sub,
-                client,
-                revoked = n,
-                "end_session revoked refresh tokens"
-            );
+        let sid = claims.get("sid").and_then(Value::as_str);
+        match (sid, client) {
+            (Some(sid), Some(client)) => {
+                let n = state.store().revoke_session(sid, client);
+                tracing::debug!(
+                    sub = ?sub_of(&claims),
+                    client,
+                    sid,
+                    revoked = n,
+                    "end_session revoked refresh tokens"
+                );
+            }
+            _ => tracing::debug!(
+                sub = ?sub_of(&claims),
+                "end_session hint without sid/azp: nothing revoked"
+            ),
         }
     }
     match q.post_logout_redirect_uri.as_deref().filter(|s| !s.is_empty()) {

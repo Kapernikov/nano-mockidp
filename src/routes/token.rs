@@ -278,6 +278,7 @@ pub async fn handler(
                     entry.upstream_sub.as_deref(),
                 ),
                 auth_time: entry.auth_time,
+                sid: Some(entry.sid.clone()),
                 expires_in: entry.expires_in,
                 with_id_token: true,
             });
@@ -289,6 +290,7 @@ pub async fn handler(
                     audience,
                     claims: entry.claims,
                     auth_time: entry.auth_time,
+                    sid: entry.sid,
                     expires_in: entry.expires_in,
                     offline: has_offline_access(entry.req.scope.as_deref()),
                     upstream_sub: entry.upstream_sub.clone(),
@@ -340,6 +342,7 @@ pub async fn handler(
                 nonce: None,
                 claims: with_upstream_claim(&state, claims, entry.upstream_sub.as_deref()),
                 auth_time: entry.auth_time,
+                sid: Some(entry.sid.clone()),
                 expires_in: entry.expires_in,
                 with_id_token: true,
             });
@@ -361,6 +364,7 @@ pub async fn handler(
             ensure_enabled(&state, &claims)?;
             let audience = resolve_audience(&form, &token_resources, None);
             let auth_time = now_secs();
+            let sid = random_token();
             let with_id_token = form
                 .scope
                 .as_deref()
@@ -372,6 +376,7 @@ pub async fn handler(
                 nonce: None,
                 claims: claims.clone(),
                 auth_time,
+                sid: Some(sid.clone()),
                 expires_in: None,
                 with_id_token,
             });
@@ -383,6 +388,7 @@ pub async fn handler(
                     audience,
                     claims,
                     auth_time,
+                    sid,
                     expires_in: None,
                     offline: has_offline_access(form.scope.as_deref()),
                     upstream_sub: None,
@@ -401,6 +407,7 @@ pub async fn handler(
                 nonce: None,
                 claims,
                 auth_time: now_secs(),
+                sid: None,
                 expires_in: None,
                 with_id_token: false,
             });

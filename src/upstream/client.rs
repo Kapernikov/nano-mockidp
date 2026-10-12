@@ -287,6 +287,7 @@ mod tests {
             nonce: None,
             claims: Claims::new(),
             auth_time: 0,
+            sid: None,
             expires_in: None,
             with_id_token: false,
         });

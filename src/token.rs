@@ -25,6 +25,8 @@ pub struct IssueParams {
     pub nonce: Option<String>,
     pub claims: Claims,
     pub auth_time: u64,
+    /// Login session id (`sid` claim); one per interactive or password login.
+    pub sid: Option<String>,
     pub expires_in: Option<u64>,
     pub with_id_token: bool,
 }
@@ -89,6 +91,9 @@ impl<'a> Issuer<'a> {
         let mut common = merge_claims(base, p.claims);
         common.insert("iss".into(), json!(self.issuer));
         common.insert("iat".into(), json!(now));
+        if let Some(sid) = &p.sid {
+            common.insert("sid".into(), json!(sid));
+        }
 
         let mut access = common.clone();
         access.insert("exp".into(), json!(now + access_ttl));
@@ -300,6 +305,7 @@ mod tests {
             nonce: Some("n1".into()),
             claims,
             auth_time: 42,
+            sid: None,
             expires_in: None,
             with_id_token: true,
         });
@@ -366,6 +372,7 @@ mod tests {
             nonce: None,
             claims: user,
             auth_time: 0,
+            sid: None,
             expires_in: None,
             with_id_token: false,
         });
@@ -392,6 +399,7 @@ mod tests {
             nonce: None,
             claims: Claims::new(),
             auth_time: 0,
+            sid: None,
             expires_in: Some(5),
             with_id_token: false,
         });

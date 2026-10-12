@@ -124,7 +124,7 @@ All relative to the path of `ISSUER_URL`.
 | `GET/POST /userinfo` | Bearer access token → claims |
 | `POST /introspect` | RFC 7662; also works for refresh tokens (`refresh_token_type`: `online`/`offline`). Revoked tokens and disabled users → `{"active": false}` |
 | `POST /revoke` | RFC 7009. `token` (+ optional `token_type_hint`), client auth as on `/token`. See [Offline access and revocation](#offline-access-and-revocation) |
-| `GET /end_session` | Redirects to `post_logout_redirect_uri` (+`state`) or shows "Logged out". With `id_token_hint`, revokes that user's online refresh tokens for that client |
+| `GET /end_session` | Redirects to `post_logout_redirect_uri` (+`state`) or shows "Logged out". With `id_token_hint`, revokes the online refresh tokens of that login (`sid`) for that client |
 | `GET/PUT/DELETE /admin/subjects/{sub}`, `GET /admin/subjects` | Runtime user state; only with `ADMIN_TOKEN` |
 | `POST /register` | RFC 7591 dynamic client registration; returns `client_id`/`client_secret` |
 | `GET /health` | Also at the server root |
@@ -137,7 +137,7 @@ box, so a self-registered MCP client can obtain a token your API accepts. An exp
 typed into the login claims overrides everything.
 
 Access tokens and ID tokens are both RS256 JWTs with the same claims (`iss`, `sub`, `aud`, `azp`,
-`exp`, `iat`, `auth_time`, `jti`, `scope` + whatever you typed); the ID token adds `nonce` and
+`exp`, `iat`, `auth_time`, `jti`, `scope`, `sid` for user logins + whatever you typed); the ID token adds `nonce` and
 `at_hash`. Backends can validate access tokens locally against `/jwks`.
 
 ## Offline access and revocation
@@ -156,8 +156,12 @@ For testing background jobs that act as a user with a refresh token:
   `/introspect` returns `active: false` and `/userinfo` returns 401. Backends that validate the
   JWT locally against `/jwks` will still accept it until `exp`, as with any real IdP. A client
   can only revoke its own tokens; unknown tokens get 200.
-- **`GET /end_session?id_token_hint=…`** revokes the online refresh tokens of that `sub` issued to that
-  client (`azp`); offline ones survive. Expired hints are accepted; hints with a bad signature get 400.
+- **`GET /end_session?id_token_hint=…`** ends one login, as in Keycloak: it revokes the online
+  refresh tokens with the hint's `sid` issued to that client (`azp`). Other logins of the same
+  `sub` (testers sharing a persona) and offline tokens survive. Each login (form or password
+  grant) gets its own `sid`, carried in the access and ID token and kept across refresh. A hint
+  without `sid` (from before 0.8) revokes nothing. Expired hints are accepted; hints with a bad
+  signature get 400. To log a `sub` out everywhere, use `DELETE /admin/subjects/{sub}`.
 - **Changing or removing a user at runtime** (needs `ADMIN_TOKEN`):
 
   ```sh

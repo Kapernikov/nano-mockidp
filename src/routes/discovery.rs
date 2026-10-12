@@ -29,6 +29,6 @@ pub async fn handler(
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post", "none"],
         "scopes_supported": ["openid", "profile", "email", "offline_access"],
-        "claims_supported": ["sub", "iss", "aud", "exp", "iat", "auth_time", "nonce", "email", "name"],
+        "claims_supported": ["sub", "iss", "aud", "exp", "iat", "auth_time", "sid", "nonce", "email", "name"],
     }))
 }

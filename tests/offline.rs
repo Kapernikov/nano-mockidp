@@ -440,3 +440,60 @@ async fn end_session_rejects_forged_hint() {
         .unwrap();
     assert_eq!(r.status(), StatusCode::BAD_REQUEST);
 }
+
+fn jwt_claims(token: &str) -> Value {
+    use base64::Engine;
+    let payload = token.split('.').nth(1).unwrap();
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn end_session_ends_only_that_login_of_a_shared_sub() {
+    let s = spawn(&[]).await;
+    // two testers log in as the same persona on the same client
+    let (_, a) = login(&s, "openid", "").await;
+    let (_, b) = login(&s, "openid", "").await;
+    let a_id = a["id_token"].as_str().unwrap();
+    let b_rt = b["refresh_token"].as_str().unwrap();
+    let a_rt = a["refresh_token"].as_str().unwrap();
+
+    let a_sid = jwt_claims(a_id)["sid"]
+        .as_str()
+        .expect("sid in id token")
+        .to_string();
+    let b_sid = jwt_claims(b["id_token"].as_str().unwrap())["sid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(a_sid, b_sid, "one sid per login");
+    assert_eq!(
+        jwt_claims(a["access_token"].as_str().unwrap())["sid"],
+        a_sid
+    );
+
+    // the sid survives refresh rotation
+    let (st, b2) = refresh(&s, b_rt).await;
+    assert_eq!(st, StatusCode::OK, "{b2}");
+    assert_eq!(jwt_claims(b2["id_token"].as_str().unwrap())["sid"], b_sid);
+    let b_rt = b2["refresh_token"].as_str().unwrap();
+
+    let r = s
+        .client
+        .get(format!("{}?id_token_hint={a_id}", s.url("/end_session")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    let (st, err) = refresh(&s, a_rt).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{err}");
+    let (st, body) = refresh(&s, b_rt).await;
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "other login of the same sub survives: {body}"
+    );
+}
