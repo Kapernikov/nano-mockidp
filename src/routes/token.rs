@@ -294,6 +294,8 @@ pub async fn handler(
                     expires_in: entry.expires_in,
                     offline: has_offline_access(entry.req.scope.as_deref()),
                     upstream_sub: entry.upstream_sub.clone(),
+                    upstream_email: entry.upstream_email,
+                    issued_at: now_secs(),
                 },
             );
             Ok(token_response(
@@ -347,7 +349,14 @@ pub async fn handler(
                 with_id_token: true,
             });
             let scope = entry.scope.clone();
-            let refresh = new_refresh(&state, RefreshEntry { audience, ..entry });
+            let refresh = new_refresh(
+                &state,
+                RefreshEntry {
+                    audience,
+                    issued_at: now_secs(),
+                    ..entry
+                },
+            );
             Ok(token_response(set, Some(refresh), scope.as_deref()))
         }
         Some("password") => {
@@ -392,6 +401,8 @@ pub async fn handler(
                     expires_in: None,
                     offline: has_offline_access(form.scope.as_deref()),
                     upstream_sub: None,
+                    upstream_email: None,
+                    issued_at: auth_time,
                 },
             );
             Ok(token_response(set, Some(refresh), form.scope.as_deref()))

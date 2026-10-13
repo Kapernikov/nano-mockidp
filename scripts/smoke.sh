@@ -143,6 +143,14 @@ else
   check "re-enabled: refresh works again" "$STATUS" 200
   RT=$(jq -r .refresh_token <<<"$BODY")
 
+  echo "admin sessions"
+  req GET /admin/sessions
+  check "sessions reject missing bearer" "$STATUS" 401
+  req GET /admin/sessions -H "Authorization: Bearer $ADMIN_TOKEN"
+  check "GET /admin/sessions" "$STATUS" 200
+  SID=$(jwt_claim "$AT" .sid | jq -r .)
+  check "session row for the login (sid)" "$(jq -r --arg s "$SID" '.[] | select(.sid == $s) | "\(.sub) \(.client_id) \(.offline)"' <<<"$BODY")" "$USERNAME $CLIENT_ID true"
+
   admin DELETE "$USERNAME"
   check "DELETE revoked online + offline token" "$(jq -r .revoked_refresh_tokens <<<"$BODY")" 2
   refresh "$RT"
@@ -196,7 +204,7 @@ if [[ "${UPSTREAM_SMOKE:-}" == 1 ]]; then
   # no signing key settings: a random key, so no seed warning
   "${clean_env[@]}" PORT=$GATED_PORT ISSUER_URL=$GATED LOG_LEVEL=warn UPSTREAM_ISSUER=$UP \
     UPSTREAM_CLIENT_ID=gate UPSTREAM_REQUIRE_CLAIM=groups=testers UPSTREAM_SUB_TOKEN_CLAIM=upstream_sub \
-    ./target/release/nano-mockidp &
+    ADMIN_TOKEN=smoke-gate-admin ./target/release/nano-mockidp &
   GATED_PID=$!
   for u in "$UP" "$GATED"; do
     up=0
@@ -211,7 +219,7 @@ if [[ "${UPSTREAM_SMOKE:-}" == 1 ]]; then
   check "no gate cookie → upstream login" "${to_up%%\?*}" "$UP/authorize"
   check "pre-login cookie set" "$(grep -c nano_mockidp_login_ "$JAR")" 1
   to_cb=$(curl -s -o /dev/null -w '%{redirect_url}' -X POST "$to_up" \
-    --data-urlencode username=realfrank --data-urlencode 'claims={"groups":["testers"]}')
+    --data-urlencode username=realfrank --data-urlencode 'claims={"groups":["testers"],"email":"frank@example.test"}')
   check "upstream returns to the callback" "${to_cb%%\?*}" "$GATED/upstream/callback"
   check "callback in another browser → 400" "$(curl -s -o /dev/null -w '%{http_code}' "$to_cb")" 400
   check "callback → 302" "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -c "$JAR" "$to_cb")" 302
@@ -229,6 +237,12 @@ if [[ "${UPSTREAM_SMOKE:-}" == 1 ]]; then
   check "upstream_sub from the gate, not the form" "$(jwt_claim "$AT" .upstream_sub)" '"realfrank"'
   check "gated refresh works" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GATED/token" \
     -d grant_type=refresh_token -d client_id=smoke --data-urlencode "refresh_token=$RT")" 200
+  GA=(-H "Authorization: Bearer smoke-gate-admin")
+  SESSIONS=$(curl -s "${GA[@]}" "$GATED/admin/sessions")
+  check "admin sessions: tester behind the persona" "$(jq -r '.[0] | "\(.sub) \(.upstream_sub) \(.upstream_email)"' <<<"$SESSIONS")" "alice realfrank frank@example.test"
+  SID=$(jq -r '.[0].sid' <<<"$SESSIONS")
+  check "DELETE /admin/sessions/{sid}" "$(curl -s -X DELETE "${GA[@]}" "$GATED/admin/sessions/$SID" | jq -r .revoked_refresh_tokens)" 1
+  check "no sessions left" "$(curl -s "${GA[@]}" "$GATED/admin/sessions" | jq length)" 0
 
   check "POST without cookie → 403" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$AUTHZ" \
     --data-urlencode username=alice)" 403

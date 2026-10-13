@@ -6,7 +6,7 @@ use reqwest::StatusCode;
 use serde_json::{json, Value};
 
 const CB: &str = "http://app.example/cb";
-const TESTERS: &str = r#"{"groups":["testers"]}"#;
+const TESTERS: &str = r#"{"groups":["testers"],"email":"frank@example.test"}"#;
 const SCOPE: &str = "openid offline_access";
 
 fn urlenc(s: &str) -> String {
@@ -253,6 +253,73 @@ async fn upstream_sub_claim_is_set_and_cannot_be_forged() {
     let (_, at) = decode_jwt_unverified(r["access_token"].as_str().unwrap());
     assert_eq!(at["roles"], json!(["viewer"]));
     assert_eq!(at["upstream_sub"], "realfrank");
+}
+
+async fn admin_sessions(b: &TestServer) -> Vec<Value> {
+    b.client
+        .get(b.url("/admin/sessions"))
+        .bearer_auth("adm")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn admin_sessions_show_the_tester_behind_each_persona() {
+    let (a, b) = pair("", &[("ADMIN_TOKEN", "adm")]).await;
+    let r = b.client.get(b.url("/admin/sessions")).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    assert!(admin_sessions(&b).await.is_empty());
+
+    let cookie = pass_gate(&a, &b).await;
+    let t = persona_tokens(&b, &cookie, "{}").await;
+    let rows = admin_sessions(&b).await;
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row["sub"], "alice");
+    assert_eq!(row["client_id"], "app");
+    assert_eq!(row["upstream_sub"], "realfrank");
+    assert_eq!(row["upstream_email"], "frank@example.test");
+    assert_eq!(row["offline"], true, "authz_url asks offline_access");
+    assert_eq!(row["refresh_tokens"], 1);
+    let (_, id) = decode_jwt_unverified(t["id_token"].as_str().unwrap());
+    assert_eq!(row["sid"], id["sid"]);
+    assert!(row["expires_at"].as_u64() > row["last_issued_at"].as_u64());
+
+    // refresh keeps the row (same sid); deleting it ends the login
+    let rt: Value = refresh(&b, t["refresh_token"].as_str().unwrap())
+        .await
+        .json()
+        .await
+        .unwrap();
+    let rows = admin_sessions(&b).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["sid"], id["sid"]);
+    let del = |sid: String| {
+        let b = &b;
+        async move {
+            b.client
+                .delete(b.url(&format!("/admin/sessions/{sid}")))
+                .bearer_auth("adm")
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    let sid = id["sid"].as_str().unwrap().to_string();
+    let r = del(sid.clone()).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(
+        r.json::<Value>().await.unwrap()["revoked_refresh_tokens"],
+        1
+    );
+    assert!(admin_sessions(&b).await.is_empty());
+    assert_eq!(del(sid).await.status(), StatusCode::NOT_FOUND);
+    let r = refresh(&b, rt["refresh_token"].as_str().unwrap()).await;
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

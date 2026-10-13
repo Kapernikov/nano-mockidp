@@ -64,6 +64,11 @@ fn admin_routes(state: SharedState) -> Router<SharedState> {
             "/admin/subjects/{sub}",
             get(admin::get).put(admin::put).delete(admin::delete),
         )
+        .route("/admin/sessions", get(admin::sessions))
+        .route(
+            "/admin/sessions/{sid}",
+            axum::routing::delete(admin::end_session),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             admin::require_admin,

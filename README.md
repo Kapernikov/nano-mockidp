@@ -42,7 +42,7 @@ your app generates. You get the login page: enter a username, optionally edit th
 | `ENDPOINTS_FROM_REQUEST_HOST` | `true` | Derive backend-facing endpoint URLs in discovery from the requesting `Host` (honours `X-Forwarded-Proto` / `X-Forwarded-Host`). See below. |
 | `INTERNAL_URL` | – | If set, backend-facing endpoints use this base URL instead of the request host. |
 | `STRICT` | `false` | Strict mode: only known clients, `redirect_uri` must be registered, `client_secret` checked, PKCE required for public clients. |
-| `ADMIN_TOKEN` | – | Bearer secret for the `/admin/subjects` endpoints. Unset ⇒ those endpoints don't exist (404). |
+| `ADMIN_TOKEN` | – | Bearer secret for the `/admin/subjects` and `/admin/sessions` endpoints. Unset ⇒ those endpoints don't exist (404). |
 | `CLIENTS` | `[]` | JSON array of pre-registered clients: `[{"client_id":"app","client_secret":"s","redirect_uris":["http://localhost:3000/cb"]}]`. |
 | `LOGIN_PAGE_PATH` | – | Path to a custom login HTML file. Re-read on every request, so you can edit it live. |
 | `DEFAULT_CLAIMS` | – | JSON object merged into every token (all grants). Claims from the login form (or `sub` from the grant) override it; `iss`/`exp`/`iat`/`jti` can't be set. E.g. `{"role":["admin"]}` so that a login with an empty claims field is an admin. |
@@ -126,6 +126,7 @@ All relative to the path of `ISSUER_URL`.
 | `POST /revoke` | RFC 7009. `token` (+ optional `token_type_hint`), client auth as on `/token`. See [Offline access and revocation](#offline-access-and-revocation) |
 | `GET /end_session` | Redirects to `post_logout_redirect_uri` (+`state`) or shows "Logged out". With `id_token_hint`, revokes the online refresh tokens of that login (`sid`) for that client |
 | `GET/PUT/DELETE /admin/subjects/{sub}`, `GET /admin/subjects` | Runtime user state; only with `ADMIN_TOKEN` |
+| `GET /admin/sessions`, `DELETE /admin/sessions/{sid}` | Live logins (who is behind which persona); only with `ADMIN_TOKEN` |
 | `POST /register` | RFC 7591 dynamic client registration; returns `client_id`/`client_secret` |
 | `GET /health` | Also at the server root |
 
@@ -183,10 +184,30 @@ For testing background jobs that act as a user with a refresh token:
 
 `GET` returns `{"sub", "claims", "disabled", "refresh_tokens": {"online": n, "offline": m}}`.
 
+- **Who is logged in** (needs `ADMIN_TOKEN`): `GET /admin/sessions` lists one row per live
+  login (`sid`), most recently active first. Behind the [upstream gate](#gating-with-an-upstream-idp)
+  it shows which tester is behind each shared persona:
+
+  ```json
+  [{"sid": "…", "sub": "alice", "client_id": "app",
+    "upstream_sub": "f3a1…", "upstream_email": "frank@example.com",
+    "auth_time": 1760000000, "last_issued_at": 1760003600, "expires_at": 1760090000,
+    "offline": false, "refresh_tokens": 1}]
+  ```
+
+  `last_issued_at` is the last code exchange or refresh: the "still active" signal.
+  `expires_at` is when the login's refresh token runs out unless it is refreshed again.
+  A login is listed as long as it has a live refresh token, so logout (`end_session`), revoking
+  the refresh token or deleting the subject removes it. An offline login survives logout.
+  `upstream_*` are null without the gate.
+  `DELETE /admin/sessions/{sid}` ends one login: it revokes all its refresh tokens, online and
+  offline (404 if none). Access tokens already issued stay valid until `exp`.
+
 `REQUIRE_OFFLINE_ACCESS` (0.6.0) is gone: since 0.6.1 every user grant gets a refresh token, and
 `offline_access` decides its type. If set, it is ignored with a warning at startup.
 
-Everything is in memory: a restart invalidates all refresh tokens and forgets subject state.
+Everything is in memory: a restart invalidates all refresh tokens and forgets subject state
+and the session list.
 
 ## Gating with an upstream IdP
 
@@ -238,7 +259,9 @@ The gate cookie's key is random per start: after a restart testers pass the upst
 Testers should reach the IdP at the `ISSUER_URL` host: the upstream returns there and the
 cookies are set there. With `ISSUER_FROM_REQUEST_HOST=true`, a login started on another host
 cannot finish (its pre-login cookie belongs to that host) and ends on a "start again" page.
-On a public instance use a long random `ADMIN_TOKEN` (or leave it unset).
+On a public instance use a long random `ADMIN_TOKEN` (or leave it unset). With it,
+`GET /admin/sessions` shows which tester (upstream `sub` and `email`) is logged in as which
+persona.
 Without a bypass for robots, run e2e suites against an ungated instance.
 
 The gate is a Cargo feature (`upstream`, on by default, TLS client via rustls + ring, no

@@ -48,6 +48,8 @@ pub struct CodeEntry {
     pub expires_in: Option<u64>,
     /// Upstream `sub` of the tester who passed the gate.
     pub upstream_sub: Option<String>,
+    /// Upstream `email` of that tester, if the upstream gave one.
+    pub upstream_email: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +67,10 @@ pub struct RefreshEntry {
     pub offline: bool,
     /// Upstream `sub` of the tester who passed the gate.
     pub upstream_sub: Option<String>,
+    /// Upstream `email` of that tester, if the upstream gave one.
+    pub upstream_email: Option<String>,
+    /// When this token (and the tokens issued with it) was minted, unix seconds.
+    pub issued_at: u64,
 }
 
 impl RefreshEntry {
@@ -91,6 +97,24 @@ pub struct Client {
     pub client_id: String,
     pub client_secret: Option<String>,
     pub redirect_uris: Option<Vec<String>>,
+}
+
+/// One live login (`sid`), as listed by `/admin/sessions`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Session {
+    pub sid: String,
+    /// Persona `sub`.
+    pub sub: Option<String>,
+    pub client_id: String,
+    pub upstream_sub: Option<String>,
+    pub upstream_email: Option<String>,
+    pub auth_time: u64,
+    /// Last time tokens were issued for this login (code exchange or refresh).
+    pub last_issued_at: u64,
+    /// When the login's last refresh token expires, unless refreshed again.
+    pub expires_at: u64,
+    pub offline: bool,
+    pub refresh_tokens: usize,
 }
 
 #[derive(Default)]
@@ -166,6 +190,46 @@ impl Store {
         before - self.refresh.len()
     }
 
+    /// Drop every refresh token, online and offline, of one login session (`sid`).
+    pub fn revoke_sid(&mut self, sid: &str) -> usize {
+        let before = self.refresh.len();
+        self.refresh.retain(|_, e| e.value.sid != sid);
+        before - self.refresh.len()
+    }
+
+    /// Live logins: the live refresh tokens grouped by `sid`, most recently active first.
+    pub fn sessions(&self) -> Vec<Session> {
+        let now = SystemTime::now();
+        let mut by_sid: HashMap<&str, Session> = HashMap::new();
+        for e in self.refresh.values().filter(|e| !e.is_expired(now)) {
+            let r = &e.value;
+            let expires_at = unix_secs(e.expires_at);
+            let s = by_sid.entry(&r.sid).or_insert_with(|| Session {
+                sid: r.sid.clone(),
+                sub: sub_of(&r.claims).map(str::to_string),
+                client_id: r.client_id.clone(),
+                upstream_sub: r.upstream_sub.clone(),
+                upstream_email: r.upstream_email.clone(),
+                auth_time: r.auth_time,
+                last_issued_at: r.issued_at,
+                expires_at,
+                offline: r.offline,
+                refresh_tokens: 0,
+            });
+            s.last_issued_at = s.last_issued_at.max(r.issued_at);
+            s.expires_at = s.expires_at.max(expires_at);
+            s.offline |= r.offline;
+            s.refresh_tokens += 1;
+        }
+        let mut v: Vec<Session> = by_sid.into_values().collect();
+        v.sort_by(|a, b| {
+            b.last_issued_at
+                .cmp(&a.last_issued_at)
+                .then(a.sid.cmp(&b.sid))
+        });
+        v
+    }
+
     /// Live refresh tokens of `sub` as (online, offline).
     pub fn count_refresh_for(&self, sub: &str) -> (usize, usize) {
         let now = SystemTime::now();
@@ -199,8 +263,11 @@ pub fn random_token() -> String {
 }
 
 pub fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
+    unix_secs(SystemTime::now())
+}
+
+pub fn unix_secs(t: SystemTime) -> u64 {
+    t.duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
@@ -241,6 +308,7 @@ mod tests {
             sid: "s".into(),
             expires_in: None,
             upstream_sub: None,
+            upstream_email: None,
         };
         s.codes.insert("code".into(), Expiring::new(entry, 60));
         assert!(s.take_code("code").is_some());
@@ -265,6 +333,8 @@ mod tests {
                 expires_in: None,
                 offline,
                 upstream_sub: None,
+                upstream_email: None,
+                issued_at: 0,
             },
             60,
         )
@@ -306,6 +376,33 @@ mod tests {
         assert_eq!(s.revoke_session("s1", "a"), 1);
         assert!(!s.refresh.contains_key("1"));
         assert_eq!(s.refresh.len(), 3);
+    }
+
+    #[test]
+    fn sessions_group_by_sid_and_revoke_sid_drops_all() {
+        let mut s = Store::default();
+        s.refresh
+            .insert("1".into(), refresh_in("alice", "a", false, "s1"));
+        let mut t = refresh_in("alice", "a", true, "s1");
+        t.value.issued_at = 50;
+        t.value.upstream_email = Some("frank@x".into());
+        s.refresh.insert("2".into(), t);
+        let mut t = refresh_in("bob", "b", false, "s2");
+        t.value.issued_at = 10;
+        s.refresh.insert("3".into(), t);
+        s.refresh.insert(
+            "4".into(),
+            Expiring::new(refresh_in("eve", "a", false, "s3").value, 0),
+        );
+        let v = s.sessions();
+        assert_eq!(v.len(), 2, "expired s3 not listed");
+        assert_eq!(v[0].sid, "s1");
+        assert_eq!(v[0].refresh_tokens, 2);
+        assert!(v[0].offline);
+        assert_eq!(v[0].last_issued_at, 50);
+        assert_eq!(v[1].sub.as_deref(), Some("bob"));
+        assert_eq!(s.revoke_sid("s1"), 2, "online and offline");
+        assert_eq!(s.revoke_sid("s1"), 0);
     }
 
     #[test]

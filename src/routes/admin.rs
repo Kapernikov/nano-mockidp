@@ -1,5 +1,6 @@
 //! Runtime subject management, so tests can change a user's claims or remove them while
-//! refresh tokens are outstanding. Mounted only when `ADMIN_TOKEN` is set.
+//! refresh tokens are outstanding, and a view of who is logged in (`/admin/sessions`).
+//! Mounted only when `ADMIN_TOKEN` is set.
 
 use axum::extract::{Path, Request, State};
 use axum::http::StatusCode;
@@ -95,4 +96,26 @@ pub async fn delete(State(state): State<SharedState>, Path(sub): Path<String>) -
     store.subjects.remove(&sub);
     let revoked = store.revoke_refresh_for(&sub, None, false);
     Json(json!({ "sub": sub, "revoked_refresh_tokens": revoked }))
+}
+
+/// Live logins (one row per `sid`), most recently active first. In memory: empty after a restart.
+pub async fn sessions(State(state): State<SharedState>) -> Json<Value> {
+    Json(json!(state.store().sessions()))
+}
+
+/// End one login: revoke all its refresh tokens, online and offline. Access and ID tokens
+/// already issued stay valid until they expire.
+pub async fn end_session(State(state): State<SharedState>, Path(sid): Path<String>) -> Response {
+    let revoked = state.store().revoke_sid(&sid);
+    let status = if revoked == 0 {
+        StatusCode::NOT_FOUND
+    } else {
+        tracing::info!(sid, revoked, "admin ended a login session");
+        StatusCode::OK
+    };
+    (
+        status,
+        Json(json!({ "sid": sid, "revoked_refresh_tokens": revoked })),
+    )
+        .into_response()
 }

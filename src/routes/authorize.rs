@@ -228,11 +228,11 @@ pub async fn post(
 ) -> Response {
     // Behind the upstream gate, only browsers that passed it may log in as a persona.
     #[allow(unused_mut)]
-    let mut upstream_sub: Option<String> = None;
+    let (mut upstream_sub, mut upstream_email): (Option<String>, Option<String>) = (None, None);
     #[cfg(feature = "upstream")]
     if let Some(gate) = &state.gate {
         match gate.session(&headers) {
-            Some(s) => upstream_sub = Some(s.sub),
+            Some(s) => (upstream_sub, upstream_email) = (Some(s.sub), s.email),
             None => {
                 return AuthzError::Page(
                     StatusCode::FORBIDDEN,
@@ -343,6 +343,7 @@ pub async fn post(
         sid: random_token(),
         expires_in,
         upstream_sub,
+        upstream_email,
     };
     state
         .store()
