@@ -186,6 +186,14 @@ check "after logout: online refresh → invalid_grant" "$(jq -r .error <<<"$BODY
 refresh "$RT"
 check "after logout: offline refresh still works" "$STATUS" 200
 
+# ---------- as_upstream without the gate (local instance only: it is ungated) ----------
+if [[ -n "${SERVER_PID:-}" ]]; then
+  echo "as_upstream without gate"
+  req POST "/authorize?response_type=code&client_id=$CLIENT_ID&state=s&redirect_uri=$(jq -rn --arg v "$REDIRECT_URI" '$v|@uri')" \
+    -d as_upstream=1 --data-urlencode "username=$USERNAME"
+  check "as_upstream on an ungated instance → 400" "$STATUS" 400
+fi
+
 # ---------- upstream gate (UPSTREAM_SMOKE=1; two local binaries) ----------
 if [[ "${UPSTREAM_SMOKE:-}" == 1 ]]; then
   echo "upstream gate"
@@ -204,7 +212,7 @@ if [[ "${UPSTREAM_SMOKE:-}" == 1 ]]; then
   # no signing key settings: a random key, so no seed warning
   "${clean_env[@]}" PORT=$GATED_PORT ISSUER_URL=$GATED LOG_LEVEL=warn UPSTREAM_ISSUER=$UP \
     UPSTREAM_CLIENT_ID=gate UPSTREAM_REQUIRE_CLAIM=groups=testers UPSTREAM_SUB_TOKEN_CLAIM=upstream_sub \
-    ADMIN_TOKEN=smoke-gate-admin ./target/release/nano-mockidp &
+    UPSTREAM_FORWARD_CLAIMS=roles,name ADMIN_TOKEN=smoke-gate-admin ./target/release/nano-mockidp &
   GATED_PID=$!
   for u in "$UP" "$GATED"; do
     up=0
@@ -219,7 +227,8 @@ if [[ "${UPSTREAM_SMOKE:-}" == 1 ]]; then
   check "no gate cookie → upstream login" "${to_up%%\?*}" "$UP/authorize"
   check "pre-login cookie set" "$(grep -c nano_mockidp_login_ "$JAR")" 1
   to_cb=$(curl -s -o /dev/null -w '%{redirect_url}' -X POST "$to_up" \
-    --data-urlencode username=realfrank --data-urlencode 'claims={"groups":["testers"],"email":"frank@example.test"}')
+    --data-urlencode username=realfrank \
+    --data-urlencode 'claims={"groups":["testers"],"email":"frank@example.test","name":"Frank Real","roles":["employee"]}')
   check "upstream returns to the callback" "${to_cb%%\?*}" "$GATED/upstream/callback"
   check "callback in another browser → 400" "$(curl -s -o /dev/null -w '%{http_code}' "$to_cb")" 400
   check "callback → 302" "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -c "$JAR" "$to_cb")" 302
@@ -243,6 +252,25 @@ if [[ "${UPSTREAM_SMOKE:-}" == 1 ]]; then
   SID=$(jq -r '.[0].sid' <<<"$SESSIONS")
   check "DELETE /admin/sessions/{sid}" "$(curl -s -X DELETE "${GA[@]}" "$GATED/admin/sessions/$SID" | jq -r .revoked_refresh_tokens)" 1
   check "no sessions left" "$(curl -s "${GA[@]}" "$GATED/admin/sessions" | jq length)" 0
+
+  echo "upstream gate: login as oneself (as_upstream)"
+  loc=$(curl -s -o /dev/null -w '%{redirect_url}' -b "$JAR" -X POST "$AUTHZ" -d as_upstream=1 \
+    --data-urlencode username=alice --data-urlencode 'claims={"roles":["superuser"]}')
+  code=$(sed -n 's/.*[?&]code=\([^&]*\).*/\1/p' <<<"$loc")
+  BODY=$(curl -s -X POST "$GATED/token" -d grant_type=authorization_code -d client_id=smoke \
+    -d "code=$code" --data-urlencode "redirect_uri=$REDIRECT_URI")
+  AT=$(jq -r .access_token <<<"$BODY"); RT=$(jq -r .refresh_token <<<"$BODY")
+  IDT=$(jq -r .id_token <<<"$BODY")
+  check "as_upstream: sub is the tester's" "$(jwt_claim "$AT" .sub)" '"realfrank"'
+  check "as_upstream: email from the upstream" "$(jwt_claim "$AT" .email)" '"frank@example.test"'
+  check "as_upstream: forwarded roles, not the form's" "$(jwt_claim "$AT" .roles)" '["employee"]'
+  check "as_upstream: forwarded name in the id_token" "$(jwt_claim "$IDT" .name)" '"Frank Real"'
+  check "as_upstream: unlisted claims not forwarded" "$(jwt_claim "$AT" .groups)" null
+  BODY=$(curl -s -X POST "$GATED/token" -d grant_type=refresh_token -d client_id=smoke \
+    --data-urlencode "refresh_token=$RT")
+  check "as_upstream: identity survives refresh" "$(jwt_claim "$(jq -r .access_token <<<"$BODY")" '[.sub, .roles]')" '["realfrank",["employee"]]'
+  check "as_upstream without gate cookie → 403" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$AUTHZ" \
+    -d as_upstream=1)" 403
 
   check "POST without cookie → 403" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$AUTHZ" \
     --data-urlencode username=alice)" 403

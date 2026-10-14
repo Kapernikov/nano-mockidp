@@ -315,6 +315,7 @@ mod tests {
             require_claim: None,
             session_ttl: 60,
             sub_token_claim: None,
+            forward_claims: Vec::new(),
             ca_path: None,
         }
     }
@@ -352,6 +353,7 @@ mod tests {
             require_claim: None,
             session_ttl: 60,
             sub_token_claim: None,
+            forward_claims: Vec::new(),
             ca_path: Some("/nonexistent/ca.pem".into()),
         };
         assert!(Upstream::new(cfg)

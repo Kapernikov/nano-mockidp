@@ -28,6 +28,9 @@ pub struct LoginForm {
     pub username: Option<String>,
     pub claims: Option<String>,
     pub expires_in: Option<String>,
+    /// Non-empty: log in as the tester's own upstream identity (gate only); `username`
+    /// and `claims` are ignored.
+    pub as_upstream: Option<String>,
 }
 
 /// Errors before we trust the redirect_uri are rendered as HTML; afterwards as OAuth redirects.
@@ -229,10 +232,14 @@ pub async fn post(
     // Behind the upstream gate, only browsers that passed it may log in as a persona.
     #[allow(unused_mut)]
     let (mut upstream_sub, mut upstream_email): (Option<String>, Option<String>) = (None, None);
+    let mut upstream_claims: Option<Claims> = None;
     #[cfg(feature = "upstream")]
     if let Some(gate) = &state.gate {
         match gate.session(&headers) {
-            Some(s) => (upstream_sub, upstream_email) = (Some(s.sub), s.email),
+            Some(s) => {
+                (upstream_sub, upstream_email) = (Some(s.sub), s.email);
+                upstream_claims = Some(s.claims);
+            }
             None => {
                 return AuthzError::Page(
                     StatusCode::FORBIDDEN,
@@ -246,6 +253,33 @@ pub async fn post(
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
+
+    let as_upstream = form
+        .as_upstream
+        .as_deref()
+        .is_some_and(|v| !v.trim().is_empty());
+    if as_upstream {
+        let Some(sub) = upstream_sub.clone() else {
+            return AuthzError::Page(
+                StatusCode::BAD_REQUEST,
+                "as_upstream needs the upstream gate (UPSTREAM_ISSUER)".into(),
+            )
+            .into_response();
+        };
+        let mut claims = upstream_claims.take().unwrap_or_default();
+        claims.insert("sub".into(), json!(sub));
+        if let Some(e) = &upstream_email {
+            claims.insert("email".into(), json!(e));
+        }
+        return issue_code(
+            &state,
+            req,
+            claims,
+            form.expires_in.as_deref(),
+            upstream_sub,
+            upstream_email,
+        );
+    }
 
     let mut claims: Claims = match form
         .claims
@@ -291,6 +325,26 @@ pub async fn post(
             }
         }
     }
+    issue_code(
+        &state,
+        req,
+        claims,
+        form.expires_in.as_deref(),
+        upstream_sub,
+        upstream_email,
+    )
+}
+
+/// Check the subject and `expires_in`, store an authorization code for `claims` and
+/// redirect back to the client with it.
+fn issue_code(
+    state: &SharedState,
+    req: AuthRequest,
+    claims: Claims,
+    expires_in: Option<&str>,
+    upstream_sub: Option<String>,
+    upstream_email: Option<String>,
+) -> Response {
     if let Some(sub) = sub_of(&claims).filter(|s| state.store().is_disabled(s)) {
         return AuthzError::Redirect {
             redirect_uri: req.redirect_uri.clone(),
@@ -300,12 +354,7 @@ pub async fn post(
         }
         .into_response();
     }
-    let expires_in = match form
-        .expires_in
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
+    let expires_in = match expires_in.map(str::trim).filter(|s| !s.is_empty()) {
         None => None,
         Some(v) => match v.parse::<u64>() {
             Ok(n) => Some(n),
@@ -333,7 +382,7 @@ pub async fn post(
             upstream_sub = %up,
             sub = ?sub_of(&claims),
             client_id = %req.client_id,
-            "persona login behind the upstream gate"
+            "login behind the upstream gate"
         );
     }
     let entry = CodeEntry {
