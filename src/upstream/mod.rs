@@ -24,6 +24,9 @@ use crate::store::{now_secs, random_token, Claims};
 const LOGIN_TTL: u64 = 600;
 /// Longest `/authorize` path + query carried through the upstream login in the cookie.
 const MAX_RETURN_TO: usize = 2048;
+/// Longest gate cookie value: browsers drop cookies over 4096 bytes (name and attributes
+/// included), which would send the tester round the upstream login forever.
+const MAX_GATE_COOKIE: usize = 3800;
 
 pub struct Gate {
     pub upstream: Upstream,
@@ -221,13 +224,33 @@ async fn finish(gate: &Gate, q: &CallbackQuery, login: PendingLogin) -> Response
             );
         }
     }
-    tracing::info!(upstream_sub = %sub, email = ?email, "upstream login allowed");
+    let forwarded: Claims = gate
+        .upstream
+        .cfg
+        .forward_claims
+        .iter()
+        .filter_map(|c| claims.get(c).map(|v| (c.clone(), v.clone())))
+        .collect();
     let ttl = gate.upstream.cfg.session_ttl;
     let cookie = gate.key.seal(&GateSession {
-        sub,
-        email,
+        sub: sub.clone(),
+        email: email.clone(),
+        claims: forwarded,
         exp: now_secs() + ttl,
     });
+    if cookie.len() > MAX_GATE_COOKIE {
+        tracing::error!(
+            upstream_sub = %sub,
+            bytes = cookie.len(),
+            "gate cookie too large: forward fewer claims"
+        );
+        return page(
+            StatusCode::BAD_GATEWAY,
+            "the claims in UPSTREAM_FORWARD_CLAIMS are too large for the gate cookie: \
+             forward fewer claims",
+        );
+    }
+    tracing::info!(upstream_sub = %sub, email = ?email, "upstream login allowed");
     let mut r = found(&login.return_to);
     add_set_cookie(&mut r, &gate.set_cookie(gate::COOKIE_NAME, &cookie, ttl));
     r

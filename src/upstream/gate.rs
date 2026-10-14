@@ -30,6 +30,9 @@ pub struct GateSession {
     pub sub: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
+    /// The `UPSTREAM_FORWARD_CLAIMS` of the upstream ID token, for a login as oneself.
+    #[serde(default, skip_serializing_if = "Claims::is_empty")]
+    pub claims: Claims,
     pub exp: u64,
 }
 
@@ -155,6 +158,7 @@ mod tests {
         GateSession {
             sub: "frank".into(),
             email: Some("f@x".into()),
+            claims: Claims::new(),
             exp,
         }
     }

@@ -31,11 +31,14 @@ pub struct UpstreamConfig {
     pub session_ttl: u64,
     /// Claim that carries the upstream `sub` in issued tokens.
     pub sub_token_claim: Option<String>,
+    /// Upstream ID-token claims copied into a login as the tester's own identity.
+    pub forward_claims: Vec<String>,
     /// Extra PEM CA bundle for upstream TLS.
     pub ca_path: Option<PathBuf>,
 }
 
-/// Claims `UPSTREAM_SUB_TOKEN_CLAIM` may not name: they identify the persona or the token.
+/// Claims `UPSTREAM_SUB_TOKEN_CLAIM` and `UPSTREAM_FORWARD_CLAIMS` may not name: they
+/// identify the persona or the token.
 const RESERVED_CLAIMS: &[&str] = &[
     "sub",
     "iss",
@@ -91,6 +94,21 @@ fn parse_upstream<'a>(
         }
         c => c.map(str::to_string),
     };
+    let forward_claims: Vec<String> = get("UPSTREAM_FORWARD_CLAIMS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(str::to_string)
+        .collect();
+    if let Some(c) = forward_claims
+        .iter()
+        .find(|c| RESERVED_CLAIMS.contains(&c.as_str()))
+    {
+        return Err(format!(
+            "UPSTREAM_FORWARD_CLAIMS: {c:?} is reserved, it cannot be forwarded"
+        ));
+    }
     Ok(Some(UpstreamConfig {
         issuer,
         client_id,
@@ -99,6 +117,7 @@ fn parse_upstream<'a>(
         require_claim,
         session_ttl,
         sub_token_claim,
+        forward_claims,
         ca_path: get("UPSTREAM_CA_PATH").map(PathBuf::from),
     }))
 }
@@ -420,5 +439,31 @@ mod tests {
             );
         }
         assert!(with("UPSTREAM_SESSION_TTL", "abc").is_err());
+        for reserved in ["roles,sub", "iss", "exp, name"] {
+            assert!(
+                with("UPSTREAM_FORWARD_CLAIMS", reserved).is_err(),
+                "{reserved}"
+            );
+        }
+    }
+
+    #[test]
+    fn upstream_forward_claims() {
+        let get = |v: Option<&'static str>| {
+            let mut e = vec![
+                ("UPSTREAM_ISSUER", "https://idp.example"),
+                ("UPSTREAM_CLIENT_ID", "gate"),
+            ];
+            if let Some(v) = v {
+                e.push(("UPSTREAM_FORWARD_CLAIMS", v));
+            }
+            cfg(&e).unwrap().upstream.unwrap().forward_claims
+        };
+        assert!(get(None).is_empty());
+        assert!(get(Some(" , ")).is_empty());
+        assert_eq!(
+            get(Some("roles, name,,email_verified")),
+            ["roles", "name", "email_verified"]
+        );
     }
 }

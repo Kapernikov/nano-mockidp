@@ -625,3 +625,150 @@ async fn browserless_grants_need_a_configured_client_with_secret() {
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
 }
+
+/// Pass B's gate as a tester whose upstream ID token carries `claims`; returns the gate cookie.
+async fn pass_gate_with(a: &TestServer, b: &TestServer, claims: &str) -> String {
+    let (to_cb, login) = upstream_login(a, b, claims).await;
+    let r = get_with(b, &to_cb, &login).await;
+    assert_eq!(r.status(), StatusCode::FOUND, "{}", r.text().await.unwrap());
+    pair_of(&set_cookie(&r, GATE_PREFIX).expect("gate cookie"))
+}
+
+/// POST the login form at B with the gate cookie; returns the response.
+async fn post_login(
+    b: &TestServer,
+    cookie: Option<&str>,
+    form: &[(&str, &str)],
+) -> reqwest::Response {
+    let mut r = b.client.post(authz_url(b)).form(form);
+    if let Some(c) = cookie {
+        r = r.header("cookie", c);
+    }
+    r.send().await.unwrap()
+}
+
+/// Redeem the code of a successful login response at B.
+async fn redeem_code(b: &TestServer, r: &reqwest::Response) -> Value {
+    assert_eq!(r.status(), StatusCode::FOUND);
+    let code = query_param(&location(r), "code").expect("code");
+    b.client
+        .post(b.url("/token"))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code.as_str()),
+            ("redirect_uri", CB),
+            ("client_id", "app"),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+const TESTER_WITH_ROLES: &str = r#"{"groups":["testers"],"email":"frank@example.test",
+    "name":"Frank Real","roles":["employee","sales"]}"#;
+
+#[tokio::test]
+async fn login_as_upstream_identity() {
+    let (a, b) = pair(
+        "",
+        &[
+            ("UPSTREAM_FORWARD_CLAIMS", "roles, name"),
+            ("UPSTREAM_SUB_TOKEN_CLAIM", "upstream_sub"),
+        ],
+    )
+    .await;
+    let cookie = pass_gate_with(&a, &b, TESTER_WITH_ROLES).await;
+    // The form's username and claims are ignored: the identity is the upstream one.
+    let r = post_login(
+        &b,
+        Some(&cookie),
+        &[
+            ("as_upstream", "1"),
+            ("username", "alice"),
+            ("claims", r#"{"roles":["superuser"],"sub":"mallory"}"#),
+        ],
+    )
+    .await;
+    let t = redeem_code(&b, &r).await;
+    for tok in ["access_token", "id_token"] {
+        let (_, c) = decode_jwt_unverified(t[tok].as_str().unwrap());
+        assert_eq!(c["sub"], "realfrank", "{tok}");
+        assert_eq!(c["email"], "frank@example.test", "{tok}");
+        assert_eq!(c["name"], "Frank Real", "{tok}");
+        assert_eq!(c["roles"], json!(["employee", "sales"]), "{tok}");
+        assert_eq!(c["upstream_sub"], "realfrank", "{tok}");
+        assert!(
+            c.get("groups").is_none(),
+            "{tok}: only listed claims are forwarded"
+        );
+    }
+    // The upstream identity survives a refresh.
+    let r: Value = refresh(&b, t["refresh_token"].as_str().unwrap())
+        .await
+        .json()
+        .await
+        .unwrap();
+    let (_, at) = decode_jwt_unverified(r["access_token"].as_str().unwrap());
+    assert_eq!(at["sub"], "realfrank");
+    assert_eq!(at["roles"], json!(["employee", "sales"]));
+}
+
+#[tokio::test]
+async fn login_as_upstream_identity_without_forwarded_claims() {
+    let (a, b) = pair("", &[]).await;
+    let cookie = pass_gate_with(&a, &b, TESTER_WITH_ROLES).await;
+    let r = post_login(&b, Some(&cookie), &[("as_upstream", "1")]).await;
+    let t = redeem_code(&b, &r).await;
+    let (_, at) = decode_jwt_unverified(t["access_token"].as_str().unwrap());
+    assert_eq!(at["sub"], "realfrank");
+    assert_eq!(at["email"], "frank@example.test");
+    assert!(
+        at.get("roles").is_none(),
+        "nothing forwarded unless configured"
+    );
+    assert!(
+        at.get("name").is_none(),
+        "nothing forwarded unless configured"
+    );
+}
+
+#[tokio::test]
+async fn persona_login_ignores_forwarded_claims() {
+    let (a, b) = pair("", &[("UPSTREAM_FORWARD_CLAIMS", "roles")]).await;
+    let cookie = pass_gate_with(&a, &b, TESTER_WITH_ROLES).await;
+    let t = persona_tokens(&b, &cookie, r#"{"roles":["admin"]}"#).await;
+    let (_, at) = decode_jwt_unverified(t["access_token"].as_str().unwrap());
+    assert_eq!(at["sub"], "alice");
+    assert_eq!(at["roles"], json!(["admin"]));
+    assert!(at.get("email").is_none());
+}
+
+#[tokio::test]
+async fn as_upstream_without_cookie_is_forbidden() {
+    let (_a, b) = pair("", &[]).await;
+    let r = post_login(&b, None, &[("as_upstream", "1")]).await;
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn as_upstream_without_gate_is_bad_request() {
+    let s = spawn(&[]).await;
+    let r = post_login(&s, None, &[("as_upstream", "1"), ("username", "alice")]).await;
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    assert!(r.text().await.unwrap().contains("upstream gate"));
+}
+
+#[tokio::test]
+async fn oversized_forwarded_claims_fail_the_gate_login() {
+    let (a, b) = pair("", &[("UPSTREAM_FORWARD_CLAIMS", "roles")]).await;
+    let roles: Vec<String> = (0..400).map(|i| format!("role-number-{i}")).collect();
+    let claims = json!({"groups": ["testers"], "roles": roles}).to_string();
+    let (to_cb, login) = upstream_login(&a, &b, &claims).await;
+    let r = get_with(&b, &to_cb, &login).await;
+    assert_eq!(r.status(), StatusCode::BAD_GATEWAY);
+    assert!(set_cookie(&r, GATE_PREFIX).is_none(), "no gate cookie");
+    assert!(r.text().await.unwrap().contains("UPSTREAM_FORWARD_CLAIMS"));
+}

@@ -71,7 +71,9 @@ Set `LOGIN_PAGE_PATH=/login.html` and mount any HTML file there. The server serv
 - a `<form method="post">` **without `action`** (so it posts back to the same URL and the OAuth
   query parameters survive),
 - a field named `username`,
-- optionally a field named `claims` (JSON object) and one named `expires_in` (seconds).
+- optionally a field named `claims` (JSON object) and one named `expires_in` (seconds),
+- optionally, behind the [upstream gate](#gating-with-an-upstream-idp), a field named
+  `as_upstream`: see [logging in as yourself](#logging-in-as-yourself).
 
 Everything else — preset buttons per project, tenants, roles, styling — is up to your HTML.
 See [`examples/login.html`](examples/login.html). The page can read `client_id`, `scope`,
@@ -213,8 +215,8 @@ and the session list.
 
 For a test environment on the internet: before the persona form, testers log in at a real
 OpenID Connect provider (Entra ID, Google, Keycloak, …) and must pass a claim check. After that,
-everything works as without the gate: any username, any claims. The upstream identity never
-becomes the token's `sub`.
+everything works as without the gate: any username, any claims. The upstream identity only
+becomes the token's `sub` when a tester [logs in as themselves](#logging-in-as-yourself).
 
 ```sh
 docker run --rm -p 8080:8080 \
@@ -237,6 +239,7 @@ Register `<ISSUER_URL>/upstream/callback` as the redirect URI at the upstream.
 | `UPSTREAM_REQUIRE_CLAIM` | – | `path=value`: the upstream ID-token claim at `path` (dots descend, e.g. `realm_access.roles=tester`) must equal `value` or, if an array, contain it. Unset → any upstream user. |
 | `UPSTREAM_SESSION_TTL` | `28800` | Seconds before a tester goes through the upstream again. |
 | `UPSTREAM_SUB_TOKEN_CLAIM` | – | Claim name that carries the tester's upstream `sub` in every token (e.g. `upstream_sub`). Can't be overridden from the form. |
+| `UPSTREAM_FORWARD_CLAIMS` | – | Comma-separated upstream ID-token claims (top level, e.g. `roles,name`) copied into a [login as yourself](#logging-in-as-yourself). Not `sub`, `iss`, `aud` or other token claims. |
 | `UPSTREAM_CA_PATH` | – | Extra PEM CA bundle for the upstream (private CA). |
 
 With the gate on:
@@ -247,6 +250,18 @@ With the gate on:
 | `POST /authorize` | needs the gate cookie, else 403 |
 | `password`, `client_credentials` grants | only for a `CLIENTS` entry with a `client_secret`, secret checked (clients from `/register` don't count) |
 | everything else | unchanged: refresh (online/offline), revoke, logout, introspect, userinfo, admin |
+
+### Logging in as yourself
+
+Next to the personas, a tester can log in as their own upstream identity: the login form posts
+a non-empty `as_upstream` field (e.g. a second submit button `name="as_upstream" value="1"`).
+The tokens then carry the upstream `sub` and `email`, plus the claims listed in
+`UPSTREAM_FORWARD_CLAIMS` from the upstream ID token. The form's `username` and `claims` are
+ignored; `expires_in` still applies. Use it when an app should see the tester's real account and
+roles as well as test personas. Without the gate, `as_upstream` is a 400.
+
+The forwarded claims ride in the gate cookie: keep them small. If they would push it past what
+browsers accept, the upstream login ends on an error page asking to forward fewer claims.
 
 **Use a secret signing key** (`SIGNING_KEY_PEM` / `SIGNING_KEY_PATH`): with a guessable
 `SIGNING_KEY_SEED` anyone can sign their own tokens and skip the gate. Startup warns about this.
@@ -319,7 +334,7 @@ curl -s -X POST http://localhost:8080/token -d grant_type=authorization_code -d 
 | Image | ~1.5 MB, `FROM scratch` | JVM, hundreds of MB |
 | Startup | milliseconds | seconds |
 | Config | env vars | env vars + JSON |
-| Login page | any HTML, two form fields | Kotlin template / custom HTML |
+| Login page | any HTML, two form fields (plus `as_upstream` behind the gate) | Kotlin template / custom HTML |
 | Issuers | one (mount path configurable) | many, path-based |
 | Response types | `code` only | `code`, `token`, `id_token`… |
 | Public/internal URL split | built in | – |
